@@ -1,0 +1,8 @@
+dependencies:
+  idf: ">=5.3"
+  lvgl/lvgl:
+    version: "^9.2.0"
+    # gc9a01_display.hpp exposes lv_display_t in its public API.
+    public: true
+  espressif/esp_lcd_gc9a01: "^2.0.4"
+  espressif/esp_lvgl_port: "^2.6.0"

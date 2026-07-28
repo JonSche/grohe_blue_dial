@@ -1,0 +1,18 @@
+# Target
+CONFIG_IDF_TARGET="esp32c3"
+
+# VIEWE UEDX24240013-MD50E-B ships 4MB flash, no PSRAM.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP=y
+
+# Modern C++ support.
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+CONFIG_COMPILER_CXX_RTTI=y
+
+# LVGL: GC9A01 is a 16bpp (RGB565) panel.
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+
+# A bit more headroom than the 3.5k default main task stack, since the LVGL
+# glue (esp_lvgl_port) and our app orchestration both grow it a little.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
