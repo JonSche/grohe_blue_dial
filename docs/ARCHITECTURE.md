@@ -95,15 +95,21 @@ boot screen with a real dial UI) without touching one another.
   `Lock() → lv_timer_handler() → Unlock() → vTaskDelay(10ms)` forever.
   Nothing in this codebase talks to the panel directly outside of
   `Gc9a01Display::Init()`/`~Gc9a01Display()`.
-  - **Single framebuffer, not double-buffered.** At boot, this chip's
-    DMA-capable heap has two separate contiguous free blocks, and the
-    second is a few hundred bytes short of a second full 240×240 RGB565
-    frame regardless of boot-time configuration (main task stack size,
-    cache, and radio Kconfig options were all ruled out as the cause).
-    `LV_DISPLAY_RENDER_MODE_FULL` supports a `NULL` second buffer — LVGL
-    simply waits for the single buffer's flush to complete before
-    rendering the next frame, which has no practically visible cost for
-    this mostly-static round-dial UI.
+  - **Small row-based partial buffer, not a full-screen framebuffer.**
+    (M3.2) A full 240×240 RGB565 frame is 115,200 bytes; a BLE memory RCA
+    established that enabling NimBLE on ESP32-C3 shrinks the DMA-capable
+    heap below that, and a follow-up architecture review established that
+    neither LVGL, the GC9A01 (which has its own GRAM and full CASET/RASET
+    windowed-write support — see `lcd_panel_gc9a01.c`), nor this UI's small,
+    localized widget updates actually require a full-frame buffer — that
+    was inherited from the vendor's reference `lvgl_port.c`, not a real
+    requirement. `Gc9a01Display` now uses `LV_DISPLAY_RENDER_MODE_PARTIAL`
+    with a 30-row buffer (14,400 bytes, ~87% smaller). LVGL computes buffer
+    height as `buf_size / stride`, so this is exactly a "30 full-width rows"
+    buffer, not an arbitrary byte count. Single-buffered, as before: LVGL
+    waits for this (now much smaller and faster) buffer's flush to
+    complete before rendering the next chunk, which remains imperceptible
+    for this mostly-static round-dial UI.
   - **Task period is 10ms, not the vendor's 5ms.** `CONFIG_FREERTOS_HZ=100`
     means one tick is 10ms; `pdMS_TO_TICKS(5)` truncates to `0` ticks under
     integer division, which made `vTaskDelay()` a no-op `taskYIELD()`

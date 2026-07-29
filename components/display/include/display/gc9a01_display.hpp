@@ -52,11 +52,12 @@ class Gc9a01Display {
   bool spi_bus_initialized_ = false;
 
   // Owned by the LVGL glue set up in Init(); torn down in ~Gc9a01Display().
-  // Single full-frame buffer: at boot, this chip's DMA-capable heap has two
-  // separate contiguous free blocks, and the second is a few hundred bytes
-  // short of a second full frame regardless of boot-time configuration, so
-  // LVGL runs single-buffered (LV_DISPLAY_RENDER_MODE_FULL still supports
-  // this -- lv_display_set_buffers()'s second buffer argument is optional).
+  // Small row-based partial draw buffer (LV_DISPLAY_RENDER_MODE_PARTIAL),
+  // not a full-screen framebuffer -- see the M3.2 architecture review and
+  // docs/ARCHITECTURE.md. LVGL runs single-buffered here too
+  // (lv_display_set_buffers()'s second buffer argument is optional),
+  // waiting for this buffer's flush to complete before rendering the next
+  // chunk.
   void* lv_buf_ = nullptr;
   SemaphoreHandle_t lock_mutex_ = nullptr;
   TaskHandle_t lvgl_task_ = nullptr;
