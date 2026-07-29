@@ -15,15 +15,9 @@ void App::Run() {
 
   ESP_ERROR_CHECK(display_.Init());
 
-  // TODO(debug): remove -- confirms the Lock()/ui_.Init()/Unlock() sequence
-  // actually executes (as opposed to Lock() failing and silently skipping
-  // UI construction).
-  ESP_LOGI(kTag, "Attempting to acquire LVGL lock");
   if (display::Gc9a01Display::Lock()) {
-    ESP_LOGI(kTag, "LVGL lock acquired, calling ui_.Init()");
     ui_.Init(display_.LvDisplay());
     display::Gc9a01Display::Unlock();
-    ESP_LOGI(kTag, "ui_.Init() returned, lock released");
   } else {
     ESP_LOGE(kTag, "Failed to acquire LVGL lock -- UI was never built");
   }

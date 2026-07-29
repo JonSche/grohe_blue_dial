@@ -122,3 +122,18 @@ Since the ESP-IDF reference is the one being ported from this point on,
 cause above (the vendor init table was still the reason for the black
 screen; reset polarity was never in question), it just corrects which pin
 config is actually "the verified one" for the ESP-IDF port.
+
+## Correction: the backlight polarity row above was also wrong
+
+The "Backlight pin/polarity: active-high" row was carried over from the
+manufacturer's Arduino/ESP_Panel header claim
+(`ESP_PANEL_BACKLIGHT_ON_LEVEL=1`) without independent verification. A later
+investigation (during the LVGL/display bring-up work in `display/`) found
+GPIO8 is actually **active-LOW**, driven through a P-channel MOSFET
+high-side switch (Q1, CJ3407, confirmed against both the board schematic and
+the manufacturer's own `bsp_lcd.c` duty-cycle math), and confirmed
+empirically on hardware. This is fixed in
+`components/display/gc9a01_display.cpp`'s `SetBacklight()`.
+`components/bringup/color_cycle_test.cpp` has the same inverted assumption
+and has not been fixed, since `bringup` is a standalone diagnostic outside
+this correction's scope.

@@ -31,7 +31,6 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_check.h"
-#include "esp_timer.h"  // TODO(debug): esp_timer_get_time() for draw_bitmap timestamps
 
 #include "lcd_panel_gc9a01.h"
 
@@ -155,10 +154,6 @@ static esp_err_t panel_gc9a01_reset(esp_lcd_panel_t *panel)
     gc9a01_panel_t *gc9a01 = __containerof(panel, gc9a01_panel_t, base);
     esp_lcd_panel_io_handle_t io = gc9a01->io;
 
-    // TODO(debug): remove -- traces every reset() call and which path it takes.
-    ESP_LOGW(TAG, "reset() ENTER t=%lld us gpio=%d level=%d",
-             (long long)esp_timer_get_time(), gc9a01->reset_gpio_num, gc9a01->reset_level);
-
     // perform hardware reset
     if (gc9a01->reset_gpio_num >= 0) {
         gpio_set_level(gc9a01->reset_gpio_num, gc9a01->reset_level);
@@ -169,9 +164,6 @@ static esp_err_t panel_gc9a01_reset(esp_lcd_panel_t *panel)
         esp_lcd_panel_io_tx_param(io, LCD_CMD_SWRESET, NULL, 0);
         vTaskDelay(pdMS_TO_TICKS(20)); // spec, wait at least 5m before sending new command
     }
-
-    // TODO(debug): remove -- see ENTER log above.
-    ESP_LOGW(TAG, "reset() EXIT t=%lld us", (long long)esp_timer_get_time());
 
     return ESP_OK;
 }
@@ -258,19 +250,12 @@ static esp_err_t panel_gc9a01_init(esp_lcd_panel_t *panel)
         for (uint16_t i = 0; i < gc9a01->init_cmds_size; i++) {
             // The vendor table may write MADCTL (LCD_CMD_MADCTL) directly
             // over SPI. Keep madctl_val in sync with that so a later
-            // mirror()/swap_xy() call (e.g. from esp_lvgl_port's rotation
-            // setup) recomputes from the panel's real current MADCTL
-            // instead of the constructor's stale default, and doesn't
-            // silently overwrite bits (e.g. BGR) the vendor table set.
+            // mirror()/swap_xy() call recomputes from the panel's real
+            // current MADCTL instead of the constructor's stale default,
+            // and doesn't silently overwrite bits (e.g. BGR) the vendor
+            // table set.
             if (gc9a01->init_cmds[i].cmd == LCD_CMD_MADCTL && gc9a01->init_cmds[i].data_bytes >= 1) {
                 gc9a01->madctl_val = ((const uint8_t *)gc9a01->init_cmds[i].data)[0];
-            }
-            // TODO(debug): remove -- confirms the real MADCTL value the
-            // panel receives at init, and that the shadow above now matches
-            // it.
-            if (gc9a01->init_cmds[i].cmd == 0x36 && gc9a01->init_cmds[i].data_bytes >= 1) {
-                ESP_LOGW(TAG, "vendor table sends MADCTL=0x%02x directly (madctl_val shadow now=0x%02x)",
-                         ((const uint8_t *)gc9a01->init_cmds[i].data)[0], gc9a01->madctl_val);
             }
             esp_lcd_panel_io_tx_param(io, gc9a01->init_cmds[i].cmd, gc9a01->init_cmds[i].data, gc9a01->init_cmds[i].data_bytes);
             if (gc9a01->init_cmds[i].delay_ms > 0) {
@@ -290,31 +275,9 @@ static esp_err_t panel_gc9a01_init(esp_lcd_panel_t *panel)
 
 static esp_err_t panel_gc9a01_draw_bitmap(esp_lcd_panel_t *panel, int x_start, int y_start, int x_end, int y_end, const void *color_data)
 {
-    // TODO(debug): remove -- logs every draw_bitmap call with an explicit
-    // microsecond timestamp (esp_timer_get_time(), monotonic since boot) to
-    // check whether the once-per-second black flash coincides with a redraw.
-    // Capped only as a runaway-log safety net, not to hide anything relevant.
-    static int debug_call_count = 0;
-    if (debug_call_count < 500) {
-        debug_call_count++;
-        ESP_LOGI(TAG, "draw_bitmap #%d: t=%lld us x[%d,%d) y[%d,%d) data=%p",
-                 debug_call_count, (long long)esp_timer_get_time(), x_start, x_end, y_start, y_end, color_data);
-    }
-
     gc9a01_panel_t *gc9a01 = __containerof(panel, gc9a01_panel_t, base);
     assert((x_start < x_end) && (y_start < y_end) && "start position must be smaller than end position");
     esp_lcd_panel_io_handle_t io = gc9a01->io;
-
-    // TODO(debug): remove -- dumps the first 16 RGB565 pixels and the
-    // gap values for draw_bitmap #1 only, before the gap adjustment below.
-    if (debug_call_count == 1) {
-        const uint16_t *px = (const uint16_t *)color_data;
-        ESP_LOGW(TAG, "draw_bitmap #1 raw args: x[%d,%d) y[%d,%d) x_gap=%d y_gap=%d bits_per_pixel=%u",
-                 x_start, x_end, y_start, y_end, gc9a01->x_gap, gc9a01->y_gap, gc9a01->bits_per_pixel);
-        ESP_LOGW(TAG, "draw_bitmap #1 first 16 px: %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x",
-                 px[0], px[1], px[2], px[3], px[4], px[5], px[6], px[7],
-                 px[8], px[9], px[10], px[11], px[12], px[13], px[14], px[15]);
-    }
 
     x_start += gc9a01->x_gap;
     x_end += gc9a01->x_gap;
@@ -334,28 +297,11 @@ static esp_err_t panel_gc9a01_draw_bitmap(esp_lcd_panel_t *panel, int x_start, i
         (uint8_t)(((y_end - 1) >> 8) & 0xFF),
         (uint8_t)((y_end - 1) & 0xFF),
     };
-    // TODO(debug): remove -- the exact address window bytes sent to the
-    // panel for draw_bitmap #1, after gap adjustment.
-    if (debug_call_count == 1) {
-        ESP_LOGW(TAG, "draw_bitmap #1 CASET=%02x %02x %02x %02x  RASET=%02x %02x %02x %02x",
-                 caset[0], caset[1], caset[2], caset[3], raset[0], raset[1], raset[2], raset[3]);
-    }
     esp_lcd_panel_io_tx_param(io, LCD_CMD_CASET, caset, 4);
     esp_lcd_panel_io_tx_param(io, LCD_CMD_RASET, raset, 4);
     // transfer frame buffer
     size_t len = (x_end - x_start) * (y_end - y_start) * gc9a01->bits_per_pixel / 8;
     esp_lcd_panel_io_tx_color(io, LCD_CMD_RAMWR, color_data, len);
-
-    // TODO(debug): remove -- "flush complete" from this driver's point of
-    // view: esp_lcd_panel_io_tx_color() has returned, i.e. the transfer is
-    // queued (DMA may still be physically transmitting; actual completion
-    // is signaled later via the io's on_color_trans_done callback, which
-    // esp_lvgl_port registers internally and which this driver has no
-    // visibility into).
-    if (debug_call_count <= 500) {
-        ESP_LOGI(TAG, "draw_bitmap #%d flush-queued t=%lld us len=%u",
-                 debug_call_count, (long long)esp_timer_get_time(), (unsigned)len);
-    }
 
     return ESP_OK;
 }
@@ -370,28 +316,14 @@ static esp_err_t panel_gc9a01_invert_color(esp_lcd_panel_t *panel, bool invert_c
     } else {
         command = LCD_CMD_INVOFF;
     }
-    // TODO(debug): remove -- traces every invert_color() call.
-    ESP_LOGW(TAG, "invert_color(%d) t=%lld us -> cmd=0x%02x", invert_color_data, (long long)esp_timer_get_time(), command);
     esp_lcd_panel_io_tx_param(io, command, NULL, 0);
     return ESP_OK;
 }
-
-// TODO(experiment): both functions below are temporarily forced into no-ops
-// -- neither touches madctl_val nor sends a MADCTL write -- so the vendor
-// table's MADCTL=0x48 is never modified after init, no matter what
-// esp_lvgl_port's automatic rotation setup calls them with. Isolated test
-// only; not a permanent fix.
-#define GC9A01_EXPERIMENT_PIN_MADCTL 1
 
 static esp_err_t panel_gc9a01_mirror(esp_lcd_panel_t *panel, bool mirror_x, bool mirror_y)
 {
     gc9a01_panel_t *gc9a01 = __containerof(panel, gc9a01_panel_t, base);
     esp_lcd_panel_io_handle_t io = gc9a01->io;
-#if GC9A01_EXPERIMENT_PIN_MADCTL
-    ESP_LOGW(TAG, "mirror(x=%d,y=%d) t=%lld us called -> IGNORED, MADCTL left at 0x%02x",
-             mirror_x, mirror_y, (long long)esp_timer_get_time(), gc9a01->madctl_val);
-    return ESP_OK;
-#endif
     if (mirror_x) {
         gc9a01->madctl_val |= LCD_CMD_MX_BIT;
     } else {
@@ -402,11 +334,6 @@ static esp_err_t panel_gc9a01_mirror(esp_lcd_panel_t *panel, bool mirror_x, bool
     } else {
         gc9a01->madctl_val &= ~LCD_CMD_MY_BIT;
     }
-    // TODO(debug): remove -- confirms whether/when this gets called (e.g. by
-    // esp_lvgl_port's rotation setup) and what MADCTL value it computes from
-    // its own shadow state, which was never told about the vendor table's
-    // own 0x36 write during init.
-    ESP_LOGW(TAG, "mirror(x=%d,y=%d) t=%lld us -> MADCTL=0x%02x", mirror_x, mirror_y, (long long)esp_timer_get_time(), gc9a01->madctl_val);
     esp_lcd_panel_io_tx_param(io, LCD_CMD_MADCTL, (uint8_t[]) {
         gc9a01->madctl_val
     }, 1);
@@ -417,18 +344,11 @@ static esp_err_t panel_gc9a01_swap_xy(esp_lcd_panel_t *panel, bool swap_axes)
 {
     gc9a01_panel_t *gc9a01 = __containerof(panel, gc9a01_panel_t, base);
     esp_lcd_panel_io_handle_t io = gc9a01->io;
-#if GC9A01_EXPERIMENT_PIN_MADCTL
-    ESP_LOGW(TAG, "swap_xy(%d) t=%lld us called -> IGNORED, MADCTL left at 0x%02x",
-             swap_axes, (long long)esp_timer_get_time(), gc9a01->madctl_val);
-    return ESP_OK;
-#endif
     if (swap_axes) {
         gc9a01->madctl_val |= LCD_CMD_MV_BIT;
     } else {
         gc9a01->madctl_val &= ~LCD_CMD_MV_BIT;
     }
-    // TODO(debug): remove -- see panel_gc9a01_mirror() above.
-    ESP_LOGW(TAG, "swap_xy(%d) t=%lld us -> MADCTL=0x%02x", swap_axes, (long long)esp_timer_get_time(), gc9a01->madctl_val);
     esp_lcd_panel_io_tx_param(io, LCD_CMD_MADCTL, (uint8_t[]) {
         gc9a01->madctl_val
     }, 1);
@@ -440,8 +360,6 @@ static esp_err_t panel_gc9a01_set_gap(esp_lcd_panel_t *panel, int x_gap, int y_g
     gc9a01_panel_t *gc9a01 = __containerof(panel, gc9a01_panel_t, base);
     gc9a01->x_gap = x_gap;
     gc9a01->y_gap = y_gap;
-    // TODO(debug): remove -- traces every set_gap() call.
-    ESP_LOGW(TAG, "set_gap(x=%d,y=%d)", x_gap, y_gap);
     return ESP_OK;
 }
 
@@ -455,9 +373,6 @@ static esp_err_t panel_gc9a01_disp_on_off(esp_lcd_panel_t *panel, bool on_off)
     } else {
         command = LCD_CMD_DISPOFF;
     }
-    // TODO(debug): remove -- traces every disp_on_off() call; DISPOFF here
-    // would blank the panel outright.
-    ESP_LOGW(TAG, "disp_on_off(%d) t=%lld us -> cmd=0x%02x", on_off, (long long)esp_timer_get_time(), command);
     esp_lcd_panel_io_tx_param(io, command, NULL, 0);
     return ESP_OK;
 }

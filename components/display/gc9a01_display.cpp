@@ -3,20 +3,76 @@
 #include "board/board_config.hpp"
 #include "esp_lcd_gc9a01.h"
 #include "gc9a01_vendor/gc9a01_vendor_init.hpp"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_lvgl_port.h"
-#include "esp_timer.h"  // TODO(debug): esp_timer_get_time() for SetBacklight() timestamps
+#include "esp_timer.h"
 #include "driver/gpio.h"
 #include "lcd_panel_gc9a01.h"
 
 namespace display {
 namespace {
 constexpr char kTag[] = "gc9a01_display";
+
+// LVGL glue constants. The vendor's own lvgl_port.c is the behavioral
+// reference for init order and memory footprint, translated to LVGL v9.
+constexpr uint32_t kLvTickPeriodMs = 2;
+// 10ms, not the vendor's 5ms: at CONFIG_FREERTOS_HZ=100 (10ms/tick),
+// pdMS_TO_TICKS(5) truncates to 0 ticks, so vTaskDelay() would never
+// actually block. 10ms is the smallest delay at this tick rate that blocks
+// for a real, non-zero tick, and is the closest achievable approximation of
+// the original 5ms cadence.
+constexpr uint32_t kLvglTaskPeriodMs = 10;
+// Known-good size carried over from esp_lvgl_port's default. The vendor's
+// own task uses a smaller 4096-byte stack; shrinking this is a separate,
+// later optimization gated on a high-water-mark measurement
+// (uxTaskGetStackHighWaterMark()).
+constexpr uint32_t kLvglTaskStackSize = 7168;
+constexpr UBaseType_t kLvglTaskPriority = 5;
+constexpr BaseType_t kLvglTaskCore = 0;
+
+void FlushCbTrampoline(lv_display_t* disp, const lv_area_t* area,
+                       uint8_t* px_map) {
+  auto panel = static_cast<esp_lcd_panel_handle_t>(lv_display_get_user_data(disp));
+  esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2 + 1,
+                             area->y2 + 1, px_map);
+}
+
+bool OnColorTransDoneTrampoline(esp_lcd_panel_io_handle_t /*panel_io*/,
+                                 esp_lcd_panel_io_event_data_t* /*edata*/,
+                                 void* user_ctx) {
+  lv_display_flush_ready(static_cast<lv_display_t*>(user_ctx));
+  return false;
+}
+
+void TickCb(void* /*arg*/) { lv_tick_inc(kLvTickPeriodMs); }
 }  // namespace
 
+Gc9a01Display* Gc9a01Display::instance_ = nullptr;
+
 Gc9a01Display::~Gc9a01Display() {
+  if (lvgl_task_ != nullptr) {
+    vTaskDelete(lvgl_task_);
+    lvgl_task_ = nullptr;
+  }
+  if (lv_tick_timer_ != nullptr) {
+    esp_timer_stop(lv_tick_timer_);
+    esp_timer_delete(lv_tick_timer_);
+    lv_tick_timer_ = nullptr;
+  }
+  if (lock_mutex_ != nullptr) {
+    vSemaphoreDelete(lock_mutex_);
+    lock_mutex_ = nullptr;
+  }
+  if (instance_ == this) {
+    instance_ = nullptr;
+  }
   if (lv_display_ != nullptr) {
-    lvgl_port_remove_disp(lv_display_);
+    lv_display_delete(lv_display_);
+    lv_display_ = nullptr;
+  }
+  if (lv_buf_ != nullptr) {
+    heap_caps_free(lv_buf_);
+    lv_buf_ = nullptr;
   }
   if (panel_ != nullptr) {
     esp_lcd_panel_del(panel_);
@@ -70,71 +126,118 @@ esp_err_t Gc9a01Display::Init() {
   ESP_ERROR_CHECK(esp_lcd_panel_init(panel_));
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));
 
-  ESP_LOGI(kTag, "Starting esp_lvgl_port");
-  const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
-  ESP_ERROR_CHECK(lvgl_port_init(&lvgl_cfg));
+  ESP_LOGI(kTag, "Starting self-owned LVGL v9 integration");
+  lv_init();
 
-  const lvgl_port_display_cfg_t disp_cfg = {
-      .io_handle = panel_io_,
-      .panel_handle = panel_,
-      .control_handle = nullptr,
-      // Full-frame double buffer + full_refresh, matching the vendor
-      // project's lvgl_port.c (buf_size = LCD_H_RES*LCD_V_RES, full_refresh=1
-      // via avoid_tear) -- esp_lvgl_port asserts buffer_size == hres*vres
-      // whenever flags.full_refresh is set. This is the last stable
-      // configuration (Grohe Dial visible, no boot loop); restored as-is.
-      .buffer_size = static_cast<uint32_t>(board::kLcdHorizontalResolution) *
-                      board::kLcdVerticalResolution,
-      .double_buffer = true,
-      .trans_size = 0,
-      .hres = static_cast<uint32_t>(board::kLcdHorizontalResolution),
-      .vres = static_cast<uint32_t>(board::kLcdVerticalResolution),
-      .monochrome = false,
-      .rotation = {.swap_xy = false, .mirror_x = false, .mirror_y = false},
-      .rounder_cb = nullptr,
-      // Render natively pre-swapped (matches the vendor project's
-      // CONFIG_LV_COLOR_16_SWAP=y, which bakes the swap into every LVGL
-      // color at the type level in their LVGL v8 build) instead of
-      // rendering LV_COLOR_FORMAT_RGB565 and applying a separate
-      // lv_draw_sw_rgb565_swap() pass over every flush buffer via
-      // flags.swap_bytes. LVGL v9 has no global "16-bit swap" build
-      // option -- RGB565_SWAPPED is the per-display equivalent.
-      .color_format = LV_COLOR_FORMAT_RGB565_SWAPPED,
-      .flags =
-          {
-              .buff_dma = true,
-              .buff_spiram = false,
-              .sw_rotate = false,
-              .swap_bytes = false,
-              .full_refresh = true,
-              .direct_mode = false,
-          },
-  };
-  lv_display_ = lvgl_port_add_disp(&disp_cfg);
-  if (lv_display_ == nullptr) {
-    ESP_LOGE(kTag, "lvgl_port_add_disp failed");
+  // Single full-frame buffer, matching the vendor project's lvgl_port.c
+  // buf_size (LCD_H_RES*LCD_V_RES) and the same MALLOC_CAP flags
+  // esp_lvgl_port used for this panel type. Allocated here, before the LVGL
+  // task exists, matching the vendor's own ordering.
+  //
+  // Single-buffered, not double-buffered like the vendor: this chip's DMA-
+  // capable heap has two separate contiguous free blocks at boot, and the
+  // second is a few hundred bytes short of a second full frame regardless
+  // of boot-time config. LV_DISPLAY_RENDER_MODE_FULL supports a NULL second
+  // buffer -- LVGL simply waits for the single buffer's flush to complete
+  // before rendering the next frame, which has no practically visible cost
+  // for this mostly-static round-dial UI.
+  const uint32_t hres = static_cast<uint32_t>(board::kLcdHorizontalResolution);
+  const uint32_t vres = static_cast<uint32_t>(board::kLcdVerticalResolution);
+  const size_t buffer_size_bytes = hres * vres * sizeof(uint16_t);
+  constexpr uint32_t kBufCaps =
+      MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+
+  lv_buf_ = heap_caps_malloc(buffer_size_bytes, kBufCaps);
+  if (lv_buf_ == nullptr) {
+    ESP_LOGE(kTag, "framebuffer allocation failed (%u bytes)",
+             static_cast<unsigned>(buffer_size_bytes));
     return ESP_FAIL;
   }
-  // TODO(debug): remove -- confirms lvgl_port_add_disp actually succeeded
-  // and returned a non-null lv_display_t*.
-  ESP_LOGI(kTag, "lvgl_port_add_disp succeeded, lv_display_=%p",
-           (void*)lv_display_);
+
+  lv_display_ = lv_display_create(static_cast<int32_t>(hres),
+                                   static_cast<int32_t>(vres));
+  if (lv_display_ == nullptr) {
+    ESP_LOGE(kTag, "lv_display_create failed");
+    return ESP_FAIL;
+  }
+  // Render natively pre-swapped (matches the vendor project's
+  // CONFIG_LV_COLOR_16_SWAP=y, which bakes the swap into every LVGL color at
+  // the type level in their LVGL v8 build) instead of rendering
+  // LV_COLOR_FORMAT_RGB565 and applying a separate byte-swap pass over
+  // every flush buffer. LVGL v9 has no global "16-bit swap" build option --
+  // RGB565_SWAPPED is the per-display equivalent.
+  lv_display_set_color_format(lv_display_, LV_COLOR_FORMAT_RGB565_SWAPPED);
+  lv_display_set_buffers(lv_display_, lv_buf_, nullptr, buffer_size_bytes,
+                          LV_DISPLAY_RENDER_MODE_FULL);
+  lv_display_set_user_data(lv_display_, panel_);
+  lv_display_set_flush_cb(lv_display_, FlushCbTrampoline);
+
+  const esp_lcd_panel_io_callbacks_t io_cbs = {
+      .on_color_trans_done = OnColorTransDoneTrampoline,
+  };
+  ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(
+      panel_io_, &io_cbs, lv_display_));
+
+  const esp_timer_create_args_t tick_timer_args = {
+      .callback = TickCb,
+      .arg = nullptr,
+      .dispatch_method = ESP_TIMER_TASK,
+      .name = "lv_tick",
+      .skip_unhandled_events = true,
+  };
+  ESP_ERROR_CHECK(esp_timer_create(&tick_timer_args, &lv_tick_timer_));
+  ESP_ERROR_CHECK(esp_timer_start_periodic(
+      lv_tick_timer_, static_cast<uint64_t>(kLvTickPeriodMs) * 1000));
+
+  instance_ = this;
+  lock_mutex_ = xSemaphoreCreateRecursiveMutex();
+  if (lock_mutex_ == nullptr) {
+    ESP_LOGE(kTag, "xSemaphoreCreateRecursiveMutex failed");
+    return ESP_FAIL;
+  }
+
+  const BaseType_t task_created = xTaskCreatePinnedToCore(
+      &Gc9a01Display::TaskLoop, "lvgl", kLvglTaskStackSize, nullptr,
+      kLvglTaskPriority, &lvgl_task_, kLvglTaskCore);
+  if (task_created != pdPASS) {
+    ESP_LOGE(kTag, "xTaskCreatePinnedToCore failed");
+    return ESP_FAIL;
+  }
 
   SetBacklight(true);
   return ESP_OK;
 }
 
 void Gc9a01Display::SetBacklight(bool on) const {
-  // TODO(debug): remove -- traces every SetBacklight() call.
-  ESP_LOGW(kTag, "SetBacklight(%d) t=%lld us", on,
-           static_cast<long long>(esp_timer_get_time()));
-  gpio_set_level(board::kLcdPinBacklight, on ? 1 : 0);
+  // Active-LOW: confirmed via the vendor's bsp_lcd.c duty math, the board
+  // schematic's P-channel MOSFET (Q1, CJ3407) high-side switch, and
+  // empirically on hardware. LOW = ON, HIGH = OFF.
+  gpio_set_level(board::kLcdPinBacklight, on ? 0 : 1);
 }
 
 bool Gc9a01Display::Lock(uint32_t timeout_ms) {
-  return lvgl_port_lock(timeout_ms);
+  if (instance_ == nullptr || instance_->lock_mutex_ == nullptr) {
+    return false;
+  }
+  const TickType_t timeout_ticks =
+      (timeout_ms == 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+  return xSemaphoreTakeRecursive(instance_->lock_mutex_, timeout_ticks) ==
+         pdTRUE;
 }
 
-void Gc9a01Display::Unlock() { lvgl_port_unlock(); }
+void Gc9a01Display::Unlock() {
+  if (instance_ != nullptr && instance_->lock_mutex_ != nullptr) {
+    xSemaphoreGiveRecursive(instance_->lock_mutex_);
+  }
+}
+
+void Gc9a01Display::TaskLoop(void* /*arg*/) {
+  for (;;) {
+    static_cast<void>(Lock());
+    lv_timer_handler();
+    Unlock();
+    vTaskDelay(pdMS_TO_TICKS(kLvglTaskPeriodMs));
+  }
+}
 
 }  // namespace display

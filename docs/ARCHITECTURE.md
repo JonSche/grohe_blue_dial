@@ -26,8 +26,11 @@ components/
   board/     Pin/bus constants only (header-only). No behavior.
   bringup/   ColorCycleTest: raw esp_lcd + esp_lcd_gc9a01 smoke test (no
              LVGL). Standalone diagnostic, not part of the app/ stack.
-  display/   Gc9a01Display: SPI bus + esp_lcd_gc9a01 panel + esp_lvgl_port
-             glue. Produces an lv_display_t* and a lock/unlock pair.
+  display/   Gc9a01Display: SPI bus + a ported GC9A01 panel driver
+             (lcd_panel_gc9a01.c, replacing the generic esp_lcd_gc9a01
+             registry driver) + a self-owned LVGL v9 integration (no
+             esp_lvgl_port). Produces an lv_display_t* and a lock/unlock
+             pair.
   encoder/   RotaryEncoder (GPIO-ISR quadrature decode) and Button
              (polled, debounced by the caller). No LVGL dependency.
   ui/        UiManager: the LVGL screen/widget tree. Takes an lv_display_t*
@@ -35,14 +38,13 @@ components/
   app/       App: the composition root. Owns one instance of each of the
              above, initializes them in dependency order, and runs the
              application loop.
-main/        app_main() -> currently runs bringup::ColorCycleTest directly
-             (see docs/ROADMAP.md, M0); switches to app::App from M2 on.
+main/        app_main() -> app::App.
 ```
 
 Dependency graph (arrows = "depends on"):
 
 ```
-bringup --> board                (standalone; no lvgl, no esp_lvgl_port)
+bringup --> board                (standalone; no lvgl)
 
 app --> display --> board
 app --> ui       --> (lvgl only)
@@ -52,13 +54,13 @@ app --> encoder  --> board
 `bringup` intentionally duplicates the handful of `esp_lcd`/`esp_lcd_gc9a01`
 init calls that also appear in `display/gc9a01_display.cpp`, rather than
 depending on `display` itself — pulling in `display` would pull in its
-`lvgl`/`esp_lvgl_port` manifest dependencies too (the ESP-IDF component
-manager resolves a component's declared dependencies as soon as that
-component is part of the build, regardless of which of its classes are
-actually used), which defeats the point of a bring-up test meant to isolate
-panel/SPI/backlight issues from the UI framework. If this duplication grows
-beyond basic panel bring-up, it's worth extracting a shared "raw panel init"
-helper that both `bringup` and `display` depend on.
+`lvgl` manifest dependency too (the ESP-IDF component manager resolves a
+component's declared dependencies as soon as that component is part of the
+build, regardless of which of its classes are actually used), which defeats
+the point of a bring-up test meant to isolate panel/SPI/backlight issues
+from the UI framework. If this duplication grows beyond basic panel
+bring-up, it's worth extracting a shared "raw panel init" helper that both
+`bringup` and `display` depend on.
 
 `ui` never includes `display/gc9a01_display.hpp`; it only takes the
 `lv_display_t*` that `display` produces. This is why `ui` and `display` can
@@ -67,17 +69,40 @@ boot screen with a real dial UI) without touching one another.
 
 ## Runtime model
 
-- **LVGL task**: owned by `esp_lvgl_port` (started in
-  `Gc9a01Display::Init()`). It periodically calls `lv_timer_handler()` and
-  drives the actual SPI flush. Nothing in this codebase talks to the panel
-  directly outside of `Gc9a01Display::Init()`/`~Gc9a01Display()`.
+- **LVGL task**: self-owned, created and torn down entirely inside
+  `Gc9a01Display::Init()`/`~Gc9a01Display()` — there is no `esp_lvgl_port`
+  dependency. `Init()` sequences: `lv_init()` → allocate the frame buffer →
+  `lv_display_create()`/`set_buffers()`/`set_flush_cb()` → register the
+  panel IO's `on_color_trans_done` callback (calls `lv_display_flush_ready()`
+  from ISR context) → start a 2ms `esp_timer` driving `lv_tick_inc()` →
+  create a recursive mutex → create the dedicated LVGL task. That task loops
+  `Lock() → lv_timer_handler() → Unlock() → vTaskDelay(10ms)` forever.
+  Nothing in this codebase talks to the panel directly outside of
+  `Gc9a01Display::Init()`/`~Gc9a01Display()`.
+  - **Single framebuffer, not double-buffered.** At boot, this chip's
+    DMA-capable heap has two separate contiguous free blocks, and the
+    second is a few hundred bytes short of a second full 240×240 RGB565
+    frame regardless of boot-time configuration (main task stack size,
+    cache, and radio Kconfig options were all ruled out as the cause).
+    `LV_DISPLAY_RENDER_MODE_FULL` supports a `NULL` second buffer — LVGL
+    simply waits for the single buffer's flush to complete before
+    rendering the next frame, which has no practically visible cost for
+    this mostly-static round-dial UI.
+  - **Task period is 10ms, not the vendor's 5ms.** `CONFIG_FREERTOS_HZ=100`
+    means one tick is 10ms; `pdMS_TO_TICKS(5)` truncates to `0` ticks under
+    integer division, which made `vTaskDelay()` a no-op `taskYIELD()`
+    instead of a real sleep — the LVGL task then consumed ~99.5% of the CPU
+    and starved the idle task, tripping `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0`'s
+    watchdog every 5 seconds. 10ms is the smallest delay at this tick rate
+    that actually blocks.
 - **Main task** (`app_main` / `app::App::Run()`): after bringing every
   subsystem up, this becomes a 50 ms poll loop
   (`app::App::PollInputs()`) that reads the encoder position and button
   state and logs on change. This is a placeholder for real UI-driving logic
   in later milestones (see [ROADMAP.md](ROADMAP.md)).
 - **Locking**: LVGL itself is not thread-safe. Any code that touches LVGL
-  objects from outside the LVGL task must hold the lock:
+  objects from outside the LVGL task must hold the lock (a recursive mutex,
+  safe against nested `Lock()` calls from the same task):
 
   ```cpp
   if (display::Gc9a01Display::Lock()) {

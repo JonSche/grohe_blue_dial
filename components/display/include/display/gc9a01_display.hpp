@@ -3,6 +3,10 @@
 #include "esp_err.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "lvgl.h"
 
 namespace display {
@@ -21,7 +25,8 @@ class Gc9a01Display {
   Gc9a01Display& operator=(const Gc9a01Display&) = delete;
 
   // Brings up the SPI bus, the panel driver, the backlight GPIO, and
-  // registers the panel with esp_lvgl_port. Safe to call exactly once.
+  // registers a self-owned LVGL v9 display (frame buffers, flush callback,
+  // tick timer, dedicated task). Safe to call exactly once.
   esp_err_t Init();
 
   // The LVGL display object created by Init(), for handing to ui::UiManager.
@@ -30,17 +35,40 @@ class Gc9a01Display {
 
   void SetBacklight(bool on) const;
 
-  // Acquire/release the LVGL mutex that esp_lvgl_port uses to guard access
-  // from outside the LVGL task. Every LVGL call made from app/ui code that
+  // Acquire/release the recursive mutex guarding LVGL access from outside
+  // the dedicated LVGL task. Every LVGL call made from app/ui code that
   // isn't already inside an LVGL callback must be wrapped in Lock()/Unlock().
   [[nodiscard]] static bool Lock(uint32_t timeout_ms = 0);
   static void Unlock();
 
  private:
+  // Runs on the dedicated LVGL task; calls lv_timer_handler() under
+  // Lock()/Unlock() on a fixed period.
+  static void TaskLoop(void* arg);
+
   esp_lcd_panel_io_handle_t panel_io_ = nullptr;
   esp_lcd_panel_handle_t panel_ = nullptr;
   lv_display_t* lv_display_ = nullptr;
   bool spi_bus_initialized_ = false;
+
+  // Owned by the LVGL glue set up in Init(); torn down in ~Gc9a01Display().
+  // Single full-frame buffer: at boot, this chip's DMA-capable heap has two
+  // separate contiguous free blocks, and the second is a few hundred bytes
+  // short of a second full frame regardless of boot-time configuration, so
+  // LVGL runs single-buffered (LV_DISPLAY_RENDER_MODE_FULL still supports
+  // this -- lv_display_set_buffers()'s second buffer argument is optional).
+  void* lv_buf_ = nullptr;
+  SemaphoreHandle_t lock_mutex_ = nullptr;
+  TaskHandle_t lvgl_task_ = nullptr;
+  esp_timer_handle_t lv_tick_timer_ = nullptr;
+
+  // Lock()/Unlock() are static (existing public API), but the mutex they
+  // guard is per-instance state, matching how panel_/panel_io_ are already
+  // modeled. Gc9a01Display is only ever used as a single, process-lifetime
+  // instance (see class comment above), so a static back-pointer set once
+  // in Init() is enough to let the static methods reach that instance
+  // state.
+  static Gc9a01Display* instance_;
 };
 
 }  // namespace display

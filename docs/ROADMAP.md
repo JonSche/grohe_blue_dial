@@ -14,8 +14,9 @@ any UI framework enters the picture.
       dependency at all.
 - [x] Fills the whole screen with solid red/green/blue/white/black, one
       second each, in a loop.
-- [x] `main.cpp` currently runs this test directly (`REQUIRES bringup`,
-      not `app`) so the milestone is directly observable by flashing.
+- [x] `bringup::ColorCycleTest` stays in the tree as a standalone
+      diagnostic, kept independent of `display`/`app` for exactly this
+      purpose.
 
 ## M1 — Boot & display (LVGL) ✅
 
@@ -24,22 +25,24 @@ Bring the LVGL stack up on top of the panel bring-up from M0.
 - [x] Project scaffolding: `board`, `display`, `encoder`, `ui`, `app`
       components with a one-way dependency graph (see
       [ARCHITECTURE.md](ARCHITECTURE.md)).
-- [x] `display`: SPI bus + `esp_lcd_gc9a01` + `esp_lvgl_port` bring-up.
+- [x] `display`: SPI bus + a ported GC9A01 driver (replacing the generic
+      `esp_lcd_gc9a01` registry driver) + a self-owned LVGL v9 integration
+      (no `esp_lvgl_port` — see [ARCHITECTURE.md](ARCHITECTURE.md)'s
+      "Runtime model" for the single-framebuffer and scheduler-timing
+      details).
 - [x] `ui`: static boot screen showing "Grohe Dial".
-- [x] `encoder`: PCNT-based quadrature decode + button, wired up and logging
+- [x] `encoder`: GPIO-ISR quadrature decode + button, wired up and logging
       in `app::App::PollInputs()` but not yet driving any UI.
 - [x] No BLE — deliberately out of scope until M3.
-- [ ] Not currently what `main.cpp` runs — see M0. Re-point `main/CMakeLists.txt`
-      back to `REQUIRES app` (and `main.cpp` to `app::App`) once M0 is
-      verified on hardware; `bringup::ColorCycleTest` stays in the tree as a
-      standalone diagnostic either way.
+- [x] `main.cpp` runs `app::App` (`REQUIRES app`); verified stable on
+      hardware, no watchdog warnings.
 
 ## M2 — Input-driven UI
 
 Make the encoder and button actually do something on screen instead of
 just logging.
 
-- [ ] Switch `main.cpp` back to `app::App` (see M1's last item).
+- [x] `main.cpp` runs `app::App` (see M1).
 - [ ] Replace the poll-and-log loop in `app::App` with real event handling
       (e.g. an input event queue rather than a 50 ms diff check).
 - [ ] `ui::UiManager` grows beyond a static label: a simple focus/selection
