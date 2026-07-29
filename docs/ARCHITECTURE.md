@@ -16,9 +16,8 @@ build instructions and the pinout table.
   is the only component allowed to know about all of them at once. Nothing
   depends on `app`.
 - **New hardware is a new sibling component**, not a change to existing
-  ones. This is what lets a future BLE client slot in without touching
-  `display`, `encoder`, or `ui` — see [Adding BLE](#adding-ble-grohebleclient)
-  below.
+  ones. This is what let `grohe_ble` slot in without touching `display`,
+  `encoder`, or `ui` — see [BLE](#ble-grohe_ble) below.
 
 ## Component map
 
@@ -46,24 +45,35 @@ components/
                lv_display_t* and a DialState to render from -- no knowledge
                of SPI, GPIO, esp_lcd, or the encoder. Contains no business
                logic: Render() is a pure function of DialState.
+  grohe_ble/   BleManager owns the NimBLE host stack lifecycle and the BLE
+               connection state machine (Idle/Initializing/Scanning/
+               Connecting/Discovering/Ready/Disconnected/Backoff -- only
+               Idle->Initializing->Scanning is reachable so far; see "BLE"
+               below). GroheClient is a thin facade over it -- the one
+               class app/ is allowed to talk to for BLE, following the
+               same "app never reaches past the facade" pattern as
+               display/encoder/ui.
   app/         App: the composition root, plus DialController -- the
                "Application Controller" that owns the one DialState
                instance and applies the interaction rules (amount
                clamping, water-type toggle, dispense logging) in response
                to EncoderEvents. App itself only wires
                EncoderInput::Poll() -> DialController::HandleEvent() ->
-               UiManager::Render(); it contains no rules of its own.
+               UiManager::Render(), and separately drains
+               GroheClient::Poll() the same way; it contains no rules of
+               its own.
 main/          app_main() -> app::App.
 ```
 
 Dependency graph (arrows = "depends on"):
 
 ```
-bringup --> board                        (standalone; no lvgl)
+bringup   --> board                        (standalone; no lvgl)
 
-app --> display --> board
-app --> ui       --> dial_state, (lvgl)
-app --> encoder  --> board
+app --> display   --> board
+app --> ui        --> dial_state, (lvgl)
+app --> encoder   --> board
+app --> grohe_ble --> (bt/nimble, nvs_flash)
 app --> dial_state
 ```
 
@@ -118,10 +128,23 @@ boot screen with a real dial UI) without touching one another.
     watchdog every 5 seconds. 10ms is the smallest delay at this tick rate
     that actually blocks.
 - **Main task** (`app_main` / `app::App::Run()`): after bringing every
-  subsystem up, this becomes a 50 ms poll loop
-  (`app::App::PollInputs()`) that reads the encoder position and button
-  state and logs on change. This is a placeholder for real UI-driving logic
-  in later milestones (see [ROADMAP.md](ROADMAP.md)).
+  subsystem up, this becomes a 20 ms loop that drains
+  `EncoderInput::Poll()` into `DialController::HandleEvent()`, drains
+  `GroheClient::Poll()` (log-only until a future milestone wires BLE
+  events into `DialState` -- see below), and re-renders `UiManager` only
+  when something actually changed.
+- **NimBLE host task**: created by `nimble_port_freertos_init()` inside
+  `BleManager::Init()`, running `nimble_port_run()` for the process
+  lifetime. NimBLE's GAP/host callbacks (`ble_hs_cfg.sync_cb`/`reset_cb`)
+  fire on this task, never on the main task -- they do the minimum
+  possible work (update `BleManager`'s state, build a `BleEvent`, push it
+  onto a small bounded `xQueueSend(..., 0)` queue) and never touch
+  `DialState`/LVGL directly. `App::Run()`'s main-task loop drains that
+  queue via `GroheClient::Poll()` on every iteration
+  (`xQueueReceive(..., 0)`, non-blocking), the same shape as
+  `EncoderInput::Poll()` -- this is the one hand-off point between the two
+  tasks, and it is the only place a future milestone needs to touch to
+  start driving `DialState`/`UiManager` from BLE events.
 - **Locking**: LVGL itself is not thread-safe. Any code that touches LVGL
   objects from outside the LVGL task must hold the lock (a recursive mutex,
   safe against nested `Lock()` calls from the same task):
@@ -155,23 +178,44 @@ by `(previous_state << 2) | new_state`, updating an atomic accumulator —
 no queue, no dedicated decode task. `encoder::RotaryEncoder::GetPosition()`
 is a relaxed atomic load.
 
-## Adding BLE (`GroheBleClient`)
+## BLE (`grohe_ble`)
 
-Not implemented yet, by design (see ROADMAP.md). When it lands, the
-expected shape is:
+A dedicated architecture design review (see the M3 review in the project
+history) considered splitting this into two components (a generic
+NimBLE-wrapping `ble/` plus a Grohe-specific `grohe_ble/`), then explicitly
+rejected that split: this firmware will only ever talk to one BLE
+peripheral, so a generic reusable BLE layer is premature abstraction.
+`components/grohe_ble/` is the single component, containing two classes:
 
-1. A new `components/ble/` component (e.g. `GroheBleClient`) that wraps the
-   NimBLE/Bluedroid GATT client and exposes a small C++ API of its own
-   (connect, read/write characteristics, a status callback) — following the
-   same pattern as `display` and `encoder`.
-2. `app::App` gains one more member for it, constructs/initializes it
-   alongside the others, and wires its callbacks to `ui::UiManager` (e.g.
-   `SetStatusText()`) the same way `PollInputs()` currently logs encoder/
-   button state.
-3. `ui/` and `display/` should need **no changes** — `UiManager` already
-   accepts arbitrary status text, and BLE has no reason to know about the
-   panel or SPI bus.
+- **`BleManager`** owns the NimBLE host stack lifecycle
+  (`nimble_port_init()`/`nimble_port_freertos_init()`) and the connection
+  state machine (`BleState`: `Idle`/`Initializing`/`Scanning`/`Connecting`/
+  `Discovering`/`Ready`/`Disconnected`/`Backoff`). As of M3.1, only
+  `Idle -> Initializing -> Scanning` is actually reachable — the host
+  starts, syncs, and transitions to `Scanning`, but there is no scan,
+  connect, or discovery implementation yet (`OnHostSync()` logs "not
+  implemented yet" at that point). The remaining states exist so a future
+  milestone can fill them in without changing the enum's shape or any
+  consumer's `switch`.
+- **`GroheClient`** is a thin facade over `BleManager` — the one class
+  `app/` is allowed to talk to for BLE, mirroring how `app/` never reaches
+  past `display`/`encoder`/`ui`'s own top-level classes either. As of
+  M3.1 it does nothing beyond forwarding `Init()`/`Poll()`; this is where
+  anything specific to the Grohe Blue's advertised identity or GATT
+  protocol will live once a future milestone adds scanning/connecting/
+  discovery.
 
-If that turns out not to be true for some piece of the real BLE work, that's
-a sign the current module boundary is wrong and worth revisiting rather
-than working around.
+**Threading**: see the "NimBLE host task" bullet under Runtime model above
+— NimBLE callbacks hand off through a bounded queue; `App::Run()`'s main
+task is the only thing that ever drains it, on the same task and the same
+`Poll()` shape as `EncoderInput`. `DialState` is never touched by BLE
+callbacks directly, now or in the future.
+
+**`ui/` and `display/` need no changes** for any of this — `UiManager` has
+no BLE awareness, and BLE has no reason to know about the panel or SPI
+bus.
+
+If a future milestone's real BLE work (scanning, connecting, GATT
+discovery, reconnect/backoff) turns out not to fit cleanly into this
+shape, that's a sign the module boundary is wrong and worth revisiting
+rather than working around.

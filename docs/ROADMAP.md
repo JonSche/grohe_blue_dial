@@ -68,14 +68,47 @@ just logging.
 
 Introduce connectivity without yet committing to what it controls.
 
-- [ ] New `components/ble/` component (`GroheBleClient`) — NimBLE GATT
-      client: scan/connect, service discovery, a small callback-based API.
-      No dependency on `display`/`encoder`/`ui`, matching the existing
-      component pattern.
-- [ ] `app::App` owns a `GroheBleClient` instance and surfaces connection
-      state through `ui::UiManager::SetStatusText()`.
-- [ ] Reconnection/backoff handling; this is where most of the real
-      complexity will live.
+- [x] Architecture design review: NimBLE (not Bluedroid), single
+      `components/grohe_ble/` component (not a generic `ble/` +
+      Grohe-specific split — rejected as premature abstraction, see
+      [ARCHITECTURE.md](ARCHITECTURE.md#ble-grohe_ble)), queue-based
+      threading model mirroring `EncoderInput::Poll()`.
+
+### M3.1 — BLE infrastructure ✅
+
+NimBLE host init and the state-machine skeleton only — no scanning,
+connecting, or discovery yet.
+
+- [x] `components/grohe_ble/`: `BleManager` (NimBLE host lifecycle, state
+      machine, bounded event queue) + `GroheClient` (thin facade), wired
+      into `app::App` (`Init()` failure logs and continues without BLE;
+      `Poll()` drained from the main loop, log-only for now).
+- [x] Minimal NimBLE Kconfig (`CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1`,
+      `CONFIG_BT_NIMBLE_MAX_BONDS=1` — this firmware only ever talks to
+      one peripheral).
+- [x] Verified on hardware: `Idle -> Initializing -> Scanning` transitions
+      correctly, host-synced event flows through the queue to `App`'s
+      poll loop, BLE and the display coexist with no boot loop or
+      stability issues (see M3.2).
+- [ ] Scanning, connecting, GATT discovery, reconnect/backoff — this is
+      where most of the real complexity will live; deferred to a future
+      milestone once the Grohe Blue's actual GATT contract is known.
+
+### M3.2 — Display: LVGL partial rendering ✅
+
+Not originally planned as part of M3 — enabling BLE surfaced a real
+memory conflict (a Root Cause Analysis traced it to ESP32-C3's IRAM/DRAM
+aliasing under NimBLE, not fixable from this project's side; a follow-up
+architecture review found the display's full-screen framebuffer was an
+inherited implementation choice, not a requirement — see
+[ARCHITECTURE.md](ARCHITECTURE.md#runtime-model)).
+
+- [x] `Gc9a01Display` switched from a 115,200-byte full-frame buffer
+      (`LV_DISPLAY_RENDER_MODE_FULL`) to a 14,400-byte, 30-row partial
+      buffer (`LV_DISPLAY_RENDER_MODE_PARTIAL`) — no changes needed to the
+      flush callback or the GC9A01 panel driver, both already area-
+      agnostic. Verified on hardware: BLE and display now coexist, UI is
+      pixel-identical, no artifacts or stability issues.
 
 ## M4 — Grohe Blue control
 

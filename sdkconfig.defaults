@@ -3,7 +3,12 @@ CONFIG_IDF_TARGET="esp32c3"
 
 # VIEWE UEDX24240013-MD50E-B ships 4MB flash, no PSRAM.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-CONFIG_PARTITION_TABLE_SINGLE_APP=y
+# 1.5MB app partition, not the default 1MB: NimBLE alone (M3.1) already
+# used ~98% of the 1MB partition, with scanning/connecting/discovery still
+# to come in a future milestone. No OTA is in scope for this product, so a
+# single, larger factory partition -- not a second OTA slot -- is the
+# right fix. 4MB total flash comfortably fits 1.5MB + nvs + phy_init.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 
 # Modern C++ support.
 CONFIG_COMPILER_CXX_EXCEPTIONS=y
@@ -15,6 +20,16 @@ CONFIG_LV_FONT_MONTSERRAT_28=y
 # Large centered pour-amount readout on the M2 dial screen.
 CONFIG_LV_FONT_MONTSERRAT_48=y
 
-# A bit more headroom than the 3.5k default main task stack, since the LVGL
-# glue (esp_lvgl_port) and our app orchestration both grow it a little.
+# A bit more headroom than the 3.5k default main task stack, since our app
+# orchestration (display/encoder/UI/BLE init, all called from app_main)
+# grows it a little.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+
+# BLE (M3.1): NimBLE only -- this chip has no classic Bluetooth radio, and
+# NimBLE's own footprint is meaningfully smaller than Bluedroid's for a
+# BLE-only, single-peripheral product (see the M3 architecture review).
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+# This firmware only ever talks to one peripheral (the Grohe Blue).
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_MAX_BONDS=1
