@@ -37,20 +37,32 @@ Bring the LVGL stack up on top of the panel bring-up from M0.
 - [x] `main.cpp` runs `app::App` (`REQUIRES app`); verified stable on
       hardware, no watchdog warnings.
 
-## M2 — Input-driven UI
+## M2 — Input-driven UI ✅
 
 Make the encoder and button actually do something on screen instead of
 just logging.
 
 - [x] `main.cpp` runs `app::App` (see M1).
-- [ ] Replace the poll-and-log loop in `app::App` with real event handling
-      (e.g. an input event queue rather than a 50 ms diff check).
-- [ ] `ui::UiManager` grows beyond a static label: a simple focus/selection
-      model driven by encoder turns, confirm via button press.
+- [x] `encoder::EncoderInput` replaces the raw poll-and-log diff check with
+      typed events (`RotateCW`/`RotateCCW`/`ShortPress`/`LongPress`),
+      still polled from `app::App`'s 50 ms loop.
+- [x] New `dial_state::DialState` (amount_ml, water_type) is the single
+      source of truth; `app::DialController` is the "Application
+      Controller" that mutates it in response to encoder events.
+- [x] `ui::UiManager` replaced with the first real dial screen: a circular
+      progress ring (using the display's own round shape), large centered
+      amount, water type, and a static "Press to pour" hint --
+      `Render(const DialState&)` is a pure function of state, called after
+      every change.
+- [x] Interaction: rotate = ±100 ml (clamped 100-2000), short press = logs
+      a dispense request (no BLE), long press = toggles still/sparkling.
 - [ ] Backlight/idle handling (dim or blank after inactivity,
-      `Gc9a01Display::SetBacklight()` already supports on/off).
-- [ ] Decide the actual first screen(s) of the dial UI (this is a product
-      decision, not just a technical one).
+      `Gc9a01Display::SetBacklight()` already supports on/off) -- deferred,
+      out of scope for this milestone.
+- [ ] Real product decision on whether this is the final screen layout, or
+      just the first cut -- this milestone is deliberately a single static
+      screen, no menus/pages (see M4/M5 for BLE-driven content and visual
+      polish).
 
 ## M3 — BLE client foundation
 

@@ -1,8 +1,8 @@
 #pragma once
 
+#include "app/dial_controller.hpp"
 #include "display/gc9a01_display.hpp"
-#include "encoder/button.hpp"
-#include "encoder/rotary_encoder.hpp"
+#include "encoder/encoder_input.hpp"
 #include "ui/ui_manager.hpp"
 
 namespace app {
@@ -12,6 +12,10 @@ namespace app {
 // keeps those components decoupled from each other. A future BLE client
 // (e.g. GroheBleClient) plugs in here as one more member, without any of the
 // existing components needing to change.
+//
+// App itself contains no interaction rules: it only polls EncoderInput for
+// events, hands them to DialController, and re-renders UiManager from the
+// resulting DialState. All business logic lives in DialController.
 class App {
  public:
   App() = default;
@@ -20,15 +24,10 @@ class App {
   [[noreturn]] void Run();
 
  private:
-  void PollInputs();
-
   display::Gc9a01Display display_;
   ui::UiManager ui_;
-  encoder::RotaryEncoder encoder_;
-  encoder::Button button_;
-
-  int32_t last_encoder_position_ = 0;
-  bool last_button_pressed_ = false;
+  encoder::EncoderInput encoder_input_;
+  DialController dial_controller_;
 };
 
 }  // namespace app

@@ -10,10 +10,11 @@ build instructions and the pinout table.
 - **One component, one concern.** Each component owns exactly one piece of
   hardware or one layer of the stack, and exposes a small C++ class instead
   of loose C functions and globals.
-- **Dependencies point one way.** `board` sits at the bottom; `display`,
-  `encoder` and `ui` each depend only on `board` (and, for `display`/`ui`,
-  LVGL); `app` is the only component allowed to know about all of them at
-  once. Nothing depends on `app`.
+- **Dependencies point one way.** `board` and `dial_state` sit at the
+  bottom (no dependencies of their own); `display`, `encoder` and `ui` each
+  depend only on `board`/`dial_state` (and, for `display`/`ui`, LVGL); `app`
+  is the only component allowed to know about all of them at once. Nothing
+  depends on `app`.
 - **New hardware is a new sibling component**, not a change to existing
   ones. This is what lets a future BLE client slot in without touching
   `display`, `encoder`, or `ui` — see [Adding BLE](#adding-ble-grohebleclient)
@@ -23,32 +24,47 @@ build instructions and the pinout table.
 
 ```
 components/
-  board/     Pin/bus constants only (header-only). No behavior.
-  bringup/   ColorCycleTest: raw esp_lcd + esp_lcd_gc9a01 smoke test (no
-             LVGL). Standalone diagnostic, not part of the app/ stack.
-  display/   Gc9a01Display: SPI bus + a ported GC9A01 panel driver
-             (lcd_panel_gc9a01.c, replacing the generic esp_lcd_gc9a01
-             registry driver) + a self-owned LVGL v9 integration (no
-             esp_lvgl_port). Produces an lv_display_t* and a lock/unlock
-             pair.
-  encoder/   RotaryEncoder (GPIO-ISR quadrature decode) and Button
-             (polled, debounced by the caller). No LVGL dependency.
-  ui/        UiManager: the LVGL screen/widget tree. Takes an lv_display_t*
-             and nothing else — no knowledge of SPI, GPIO, or esp_lcd.
-  app/       App: the composition root. Owns one instance of each of the
-             above, initializes them in dependency order, and runs the
-             application loop.
-main/        app_main() -> app::App.
+  board/       Pin/bus constants only (header-only). No behavior.
+  dial_state/  DialState struct + WaterType enum + the amount range/step
+               constants (header-only). The single source of truth for the
+               dial UI; depends on nothing so both app/ and ui/ can share it
+               without inverting the dependency graph.
+  bringup/     ColorCycleTest: raw esp_lcd + esp_lcd_gc9a01 smoke test (no
+               LVGL). Standalone diagnostic, not part of the app/ stack.
+  display/     Gc9a01Display: SPI bus + a ported GC9A01 panel driver
+               (lcd_panel_gc9a01.c, replacing the generic esp_lcd_gc9a01
+               registry driver) + a self-owned LVGL v9 integration (no
+               esp_lvgl_port). Produces an lv_display_t* and a lock/unlock
+               pair.
+  encoder/     RotaryEncoder (GPIO-ISR quadrature decode) and Button
+               (polled, debounced by the caller) are the raw hardware
+               access. EncoderInput wraps both and turns them into typed
+               EncoderEvents (RotateCW/RotateCCW/ShortPress/LongPress) --
+               no LVGL dependency, no knowledge of what the events mean.
+  ui/          UiManager: the LVGL screen/widget tree for the dial screen
+               (progress ring, amount, water type, hint). Takes an
+               lv_display_t* and a DialState to render from -- no knowledge
+               of SPI, GPIO, esp_lcd, or the encoder. Contains no business
+               logic: Render() is a pure function of DialState.
+  app/         App: the composition root, plus DialController -- the
+               "Application Controller" that owns the one DialState
+               instance and applies the interaction rules (amount
+               clamping, water-type toggle, dispense logging) in response
+               to EncoderEvents. App itself only wires
+               EncoderInput::Poll() -> DialController::HandleEvent() ->
+               UiManager::Render(); it contains no rules of its own.
+main/          app_main() -> app::App.
 ```
 
 Dependency graph (arrows = "depends on"):
 
 ```
-bringup --> board                (standalone; no lvgl)
+bringup --> board                        (standalone; no lvgl)
 
 app --> display --> board
-app --> ui       --> (lvgl only)
+app --> ui       --> dial_state, (lvgl)
 app --> encoder  --> board
+app --> dial_state
 ```
 
 `bringup` intentionally duplicates the handful of `esp_lcd`/`esp_lcd_gc9a01`

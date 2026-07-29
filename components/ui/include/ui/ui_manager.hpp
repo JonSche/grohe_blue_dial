@@ -1,33 +1,35 @@
 #pragma once
 
-#include <string_view>
-
+#include "dial_state/dial_state.hpp"
 #include "lvgl.h"
 
 namespace ui {
 
-// Builds and owns the LVGL screen tree. All widgets that later milestones add
-// (dial gauge, BLE connection state, ...) get created through this class so
-// app::App never touches LVGL objects directly.
+// Builds and owns the LVGL screen tree for the Grohe Dial's main screen: a
+// circular progress ring showing the pour amount, the amount itself, the
+// selected water type, and a static hint. Every widget is created once in
+// Init(); Render() only ever updates their content/value from the given
+// DialState -- it never contains business logic, and DialState (not any
+// widget) is the single source of truth.
 //
-// Callers must hold the LVGL port lock (display::Gc9a01Display::Lock()) for
-// the duration of Init() and any Set*() call, since LVGL itself isn't
-// thread-safe.
+// Callers must hold the LVGL lock (display::Gc9a01Display::Lock()) for the
+// duration of Init() and Render(), since LVGL itself isn't thread-safe.
 class UiManager {
  public:
   UiManager() = default;
 
-  // Builds the boot screen ("Grohe Dial" centered on the active display) on
-  // the given LVGL display.
+  // Builds the dial screen on the given LVGL display. Widgets start empty;
+  // call Render() immediately after to populate them from the real state.
   void Init(lv_display_t* display);
 
-  // Updates the status text shown below the title. Safe to call repeatedly
-  // once Init() has run; reserved for future milestones (e.g. BLE state).
-  void SetStatusText(std::string_view text);
+  // Updates every widget to reflect state. Safe to call repeatedly; this is
+  // the only way the screen's content ever changes.
+  void Render(const dial_state::DialState& state);
 
  private:
-  lv_obj_t* title_label_ = nullptr;
-  lv_obj_t* status_label_ = nullptr;
+  lv_obj_t* arc_ = nullptr;
+  lv_obj_t* amount_label_ = nullptr;
+  lv_obj_t* water_type_label_ = nullptr;
 };
 
 }  // namespace ui

@@ -12,6 +12,8 @@ CONFIG_COMPILER_CXX_RTTI=y
 # LVGL: GC9A01 is a 16bpp (RGB565) panel.
 CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
+# Large centered pour-amount readout on the M2 dial screen.
+CONFIG_LV_FONT_MONTSERRAT_48=y
 
 # A bit more headroom than the 3.5k default main task stack, since the LVGL
 # glue (esp_lvgl_port) and our app orchestration both grow it a little.
