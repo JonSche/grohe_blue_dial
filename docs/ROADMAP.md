@@ -61,7 +61,7 @@ just logging.
       out of scope for this milestone.
 - [ ] Real product decision on whether this is the final screen layout, or
       just the first cut -- this milestone is deliberately a single static
-      screen, no menus/pages (see M4/M5 for BLE-driven content and visual
+      screen, no menus/pages (see M5/M6 for BLE-driven content and visual
       polish).
 
 ## M3 — BLE client foundation
@@ -90,9 +90,10 @@ connecting, or discovery yet.
       correctly, host-synced event flows through the queue to `App`'s
       poll loop, BLE and the display coexist with no boot loop or
       stability issues (see M3.2).
-- [ ] Scanning, connecting, GATT discovery, reconnect/backoff — this is
-      where most of the real complexity will live; deferred to a future
-      milestone once the Grohe Blue's actual GATT contract is known.
+- [x] Scanning — see M4 below.
+- [ ] Connecting, GATT discovery, reconnect/backoff — this is where most of
+      the real complexity will live; deferred until the Grohe Blue's actual
+      GATT contract is known.
 
 ### M3.2 — Display: LVGL partial rendering ✅
 
@@ -110,17 +111,44 @@ inherited implementation choice, not a requirement — see
       agnostic. Verified on hardware: BLE and display now coexist, UI is
       pixel-identical, no artifacts or stability issues.
 
-## M4 — Grohe Blue control
+## M4 — BLE advertisement discovery ✅
+
+Find the appliance, and nothing more — no connecting, GATT discovery, or
+authentication.
+
+- [x] Active, continuous scanning (`ble_gap_disc()`), with advertisement
+      payloads parsed by NimBLE's own `ble_hs_adv_parse_fields()`. Every
+      report is logged with address, address type, RSSI, PDU type, local
+      name, service UUIDs, manufacturer data and 128-bit service data.
+- [x] `components/grohe_ble/include/grohe_ble/ble_constants.hpp`: the Grohe
+      service UUID, defined exactly once, as the home for future
+      service/characteristic UUIDs.
+- [x] Detection ported from the Python reference implementation: match the
+      advertised 128-bit service UUID. On a match, stop scanning, record the
+      appliance address, transition to `DeviceFound`, and publish the event
+      through the existing queue.
+- [x] Verified on hardware: 5/5 independent 30 s trials discovered the
+      appliance (in 1.0–2.4 s, at RSSI −99 to −101 dBm), zero advertisement
+      reports logged after discovery in every trial, and the `DeviceFound`
+      event reached the app task each time. ~8,000 advertisements from 34+
+      distinct devices parsed with zero parse failures. The appliance
+      advertises no local name, which is why UUID matching — not name
+      matching — is the correct strategy.
+
+## M5 — Grohe Blue control
 
 Depends on the BLE/GATT contract of the target appliance being defined.
 
+- [ ] Connect to the appliance discovered in M4, then GATT service/
+      characteristic discovery.
 - [ ] Read appliance state (mode, filter status, whatever the real device
       exposes) over BLE and reflect it in the UI.
 - [ ] Write commands from the dial (encoder + button) back to the
       appliance.
-- [ ] Error/timeout handling for a lost or rejected connection.
+- [ ] Error/timeout handling for a lost or rejected connection, plus
+      reconnect/backoff.
 
-## M5 — Product polish
+## M6 — Product polish
 
 - [ ] Settings persistence (NVS) — last-used mode, pairing info, etc.
 - [ ] OTA updates.

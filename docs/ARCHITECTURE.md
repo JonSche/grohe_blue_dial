@@ -189,21 +189,46 @@ peripheral, so a generic reusable BLE layer is premature abstraction.
 
 - **`BleManager`** owns the NimBLE host stack lifecycle
   (`nimble_port_init()`/`nimble_port_freertos_init()`) and the connection
-  state machine (`BleState`: `Idle`/`Initializing`/`Scanning`/`Connecting`/
-  `Discovering`/`Ready`/`Disconnected`/`Backoff`). As of M3.1, only
-  `Idle -> Initializing -> Scanning` is actually reachable — the host
-  starts, syncs, and transitions to `Scanning`, but there is no scan,
-  connect, or discovery implementation yet (`OnHostSync()` logs "not
-  implemented yet" at that point). The remaining states exist so a future
-  milestone can fill them in without changing the enum's shape or any
-  consumer's `switch`.
+  state machine (`BleState`: `Idle`/`Initializing`/`Scanning`/`DeviceFound`/
+  `Connecting`/`Discovering`/`Ready`/`Disconnected`/`Backoff`). As of M4,
+  `Idle -> Initializing -> Scanning -> DeviceFound` is reachable: the host
+  starts, syncs, and actively scans until an advertisement carrying the
+  Grohe service UUID arrives, then stops scanning and records the
+  appliance's address. Connecting, GATT discovery, and reconnect/backoff
+  are not implemented — the remaining states exist so a future milestone can
+  fill them in without changing the enum's shape or any consumer's `switch`.
+- **`ble_constants.hpp`** holds the BLE protocol constants — currently just
+  the Grohe service UUID, which appears exactly once in the codebase.
+  Future service and characteristic UUIDs belong here too, so the protocol
+  surface stays reviewable in one place.
 - **`GroheClient`** is a thin facade over `BleManager` — the one class
   `app/` is allowed to talk to for BLE, mirroring how `app/` never reaches
-  past `display`/`encoder`/`ui`'s own top-level classes either. As of
-  M3.1 it does nothing beyond forwarding `Init()`/`Poll()`; this is where
-  anything specific to the Grohe Blue's advertised identity or GATT
-  protocol will live once a future milestone adds scanning/connecting/
-  discovery.
+  past `display`/`encoder`/`ui`'s own top-level classes either. It still
+  does nothing beyond forwarding `Init()`/`Poll()`; this is where GATT-level
+  Grohe protocol handling will live once a future milestone adds
+  connecting and discovery.
+
+**Detection strategy**: the appliance is identified solely by the 128-bit
+service UUID it advertises (`kGroheServiceUuid`), matched against the
+advertisement's service class UUID lists with `ble_uuid_cmp()`. This is a
+direct port of the existing Python reference implementation's predicate, not
+a re-derivation. It is also the only workable option in practice: the
+appliance advertises **no local name** (verified on hardware — `name=''` in
+every captured report), so name matching could not work, and matching on MAC
+address would break for any other unit. Advertisement payloads are parsed
+with NimBLE's own `ble_hs_adv_parse_fields()` rather than hand-decoded.
+
+**Scanning** is active (`passive = 0`) and continuous (scan window == scan
+interval). Controller-side duplicate filtering is deliberately **off**:
+this build filters duplicates by address only
+(`CONFIG_BT_CTRL_SCAN_DUPL_TYPE_DEVICE`), which would suppress a device's
+scan response once its advertisement had been seen — and since a 128-bit
+UUID consumes 17 of the 31 available payload bytes, peers commonly carry
+service UUIDs in the scan response instead. Filtering could therefore hide
+the exact field being matched on. The cost is repeated reports from nearby
+devices, which stop as soon as the appliance is found; the report handler is
+idempotent (it ignores reports once the state is no longer `Scanning`), so
+duplicates are harmless.
 
 **Threading**: see the "NimBLE host task" bullet under Runtime model above
 — NimBLE callbacks hand off through a bounded queue; `App::Run()`'s main

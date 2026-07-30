@@ -48,8 +48,9 @@ void App::Run() {
       state_changed = true;
     });
 
-    // M3.1: log-only. No DialState/UI involvement yet -- see
-    // grohe_ble/grohe_client.hpp. M4 replaces this lambda's body with a
+    // Log-only: BLE has nothing to say about DialState yet (M4 discovers
+    // the appliance; it does not connect to it) -- see
+    // grohe_ble/grohe_client.hpp. M5 replaces this lambda's body with a
     // call into DialController, the same way the encoder callback above
     // already does; nothing about this loop's shape needs to change then.
     grohe_client_.Poll([](const grohe_ble::BleEvent& event) {
