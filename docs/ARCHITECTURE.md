@@ -190,13 +190,15 @@ peripheral, so a generic reusable BLE layer is premature abstraction.
 - **`BleManager`** owns the NimBLE host stack lifecycle
   (`nimble_port_init()`/`nimble_port_freertos_init()`) and the connection
   state machine (`BleState`: `Idle`/`Initializing`/`Scanning`/`DeviceFound`/
-  `Connecting`/`Discovering`/`Ready`/`Disconnected`/`Backoff`). As of M4,
-  `Idle -> Initializing -> Scanning -> DeviceFound` is reachable: the host
-  starts, syncs, and actively scans until an advertisement carrying the
-  Grohe service UUID arrives, then stops scanning and records the
-  appliance's address. Connecting, GATT discovery, and reconnect/backoff
-  are not implemented — the remaining states exist so a future milestone can
-  fill them in without changing the enum's shape or any consumer's `switch`.
+  `Connecting`/`Connected`/`DiscoveringServices`/`ReadyForProtocol`/`Ready`/
+  `Disconnected`/`Backoff`). As of M5,
+  `Idle -> Initializing -> Scanning -> DeviceFound -> Connecting ->
+  Connected -> DiscoveringServices -> ReadyForProtocol` is reachable end to
+  end: the host starts, syncs, scans until the Grohe service UUID is seen,
+  connects, negotiates MTU, and walks the full GATT hierarchy (all primary
+  services, then all characteristics per service, one service at a time).
+  `Ready` and `Backoff` remain unimplemented — no protocol communication or
+  reconnect logic yet.
 - **`ble_constants.hpp`** holds the BLE protocol constants — currently just
   the Grohe service UUID, which appears exactly once in the codebase.
   Future service and characteristic UUIDs belong here too, so the protocol
@@ -205,8 +207,52 @@ peripheral, so a generic reusable BLE layer is premature abstraction.
   `app/` is allowed to talk to for BLE, mirroring how `app/` never reaches
   past `display`/`encoder`/`ui`'s own top-level classes either. It still
   does nothing beyond forwarding `Init()`/`Poll()`; this is where GATT-level
-  Grohe protocol handling will live once a future milestone adds
-  connecting and discovery.
+  Grohe protocol handling (reads/writes/notifications) will live once a
+  future milestone adds it.
+
+**GATT discovery** (M5): once connected, `ble_gattc_exchange_mtu()` is
+attempted (non-fatal if the peer declines — discovery still works at the
+default 23-byte MTU), then `ble_gattc_disc_all_svcs()` discovers every
+primary service, and `ble_gattc_disc_all_chrs()` walks each one's
+characteristics in turn, sequentially — not concurrently, matching
+ESP-IDF's own bundled `blecent` reference client. Only a service's handle
+range is kept in memory (`BleManager::services_`, a small fixed-size array,
+sized generously above this appliance's actual hierarchy) — not a GATT
+cache; every UUID/handle/property is logged the instant its discovery
+callback fires and never stored beyond that. A GATT-level error during
+discovery actively disconnects (`ble_gap_terminate()`), matching `blecent`'s
+own "discovery failed → terminate" pattern, rather than leaving a
+half-discovered connection sitting on this project's single connection slot
+(`CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1`).
+
+**Two hardware-discovered robustness issues, both fixed** (found via
+repeated real-device trials, not by inspection alone — the appliance's
+signal is weak, around −95 to −101 dBm, close to the receiver's sensitivity
+limit, which is what exposes both of these):
+1. ESP-IDF's bundled NimBLE fork autonomously reattempts a connection that
+   fails immediately after being established (logged as `NimBLE: Reattempt
+   connection; reason = 0x3e`, gated by `MYNEWT_VAL(BLE_ENABLE_CONN_REATTEMPT)`
+   in `ble_hs_hci_evt.c`). Its master-role reattempt path
+   (`ble_gap_master_connect_reattempt()` in `ble_gap.c`) calls
+   `ble_gap_connect()` again but passes the address of a **local stack
+   variable** as `cb_arg` instead of the original, saved `cb_arg` — a
+   genuine upstream bug. Trusting that pointer in `OnGapEvent` reproducibly
+   corrupted state on real hardware (a logged state transition through a
+   name that doesn't exist in the enum). Fixed by never trusting
+   `arg`/`cb_arg` in any of `BleManager`'s NimBLE callbacks and always
+   resolving the instance through `instance_` instead — the same pattern
+   `OnHostSync()`/`OnHostReset()` already used, now applied uniformly.
+2. Once (1) was fixed, a second, independent issue surfaced: a GATT
+   procedure callback for an already-superseded connection attempt (killed
+   by the same reattempt behavior) could arrive *after* a newer, good
+   connection had already replaced it, and — since `conn_handle_` is a
+   single shared member — would tear down the new connection based on a
+   failure that actually belonged to the old one. Every GATT callback
+   (`OnMtuResult`/`OnSvcDisc`/`OnChrDisc`) receives its own `conn_handle` as
+   a plain integer parameter (not a pointer, so unaffected by (1)); each now
+   compares it against `conn_handle_` and silently ignores the callback if
+   they don't match, exactly like `HandleDiscReport()`'s existing
+   idempotency check for stale advertisement reports.
 
 **Detection strategy**: the appliance is identified solely by the 128-bit
 service UUID it advertises (`kGroheServiceUuid`), matched against the

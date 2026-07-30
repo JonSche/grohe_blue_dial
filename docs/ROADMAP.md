@@ -61,7 +61,7 @@ just logging.
       out of scope for this milestone.
 - [ ] Real product decision on whether this is the final screen layout, or
       just the first cut -- this milestone is deliberately a single static
-      screen, no menus/pages (see M5/M6 for BLE-driven content and visual
+      screen, no menus/pages (see M6/M7 for BLE-driven content and visual
       polish).
 
 ## M3 — BLE client foundation
@@ -91,9 +91,9 @@ connecting, or discovery yet.
       poll loop, BLE and the display coexist with no boot loop or
       stability issues (see M3.2).
 - [x] Scanning — see M4 below.
-- [ ] Connecting, GATT discovery, reconnect/backoff — this is where most of
-      the real complexity will live; deferred until the Grohe Blue's actual
-      GATT contract is known.
+- [x] Connecting, GATT discovery — see M5 below.
+- [ ] Reconnect/backoff — deferred until the Grohe Blue's actual GATT
+      contract is known and there's real protocol work to reconnect *for*.
 
 ### M3.2 — Display: LVGL partial rendering ✅
 
@@ -135,12 +135,47 @@ authentication.
       advertises no local name, which is why UUID matching — not name
       matching — is the correct strategy.
 
-## M5 — Grohe Blue control
+## M5 — BLE connection & GATT service discovery ✅
+
+Establish a connection to the appliance found in M4 and walk its full GATT
+hierarchy. No protocol communication (reads/writes/notifications) yet.
+
+- [x] `ble_gap_connect()` to the address `BleManager` recorded in M4
+      (10 s timeout, matching the Python reference implementation's own
+      `DEFAULT_CONNECT_TIMEOUT`), then `ble_gattc_exchange_mtu()`
+      (non-fatal on failure), then `ble_gattc_disc_all_svcs()` and
+      `ble_gattc_disc_all_chrs()` per service, sequentially — see
+      [ARCHITECTURE.md](ARCHITECTURE.md#ble-grohe_ble) for the full
+      procedure and state-machine detail.
+- [x] New `BleState` values `Connected`/`DiscoveringServices`/
+      `ReadyForProtocol`; new `BleEventType` values `ReadyForProtocol` and
+      one shared `ConnectionFailed` (carrying the NimBLE/HCI status as
+      `reason`) covering connect timeout/failure, discovery-level GATT
+      errors, and unexpected disconnects alike — reported through the
+      existing queue, no automatic reconnect.
+- [x] Two hardware-discovered robustness bugs found and fixed during
+      self-review (see ARCHITECTURE.md): an upstream ESP-IDF/NimBLE bug
+      passing a dangling stack pointer as `cb_arg` during the controller's
+      own automatic connection-reattempt behavior, and a stale-GATT-callback
+      issue where a result from an already-superseded connection attempt
+      could tear down a newer, good one.
+- [x] Verified on hardware across ~15 trials: the full GATT hierarchy
+      (`0x1800` Generic Access, `0x1801` Generic Attribute, and the Grohe
+      service at `33f31bba-...`, handles `[10, 65535]`) discovered
+      correctly and *identically* every time it completed — including the
+      two characteristics matching the Python reference's `WRITE`
+      (`1705`, properties `WRITE`) and `READ` (`1706`, properties
+      `READ NOTIFY`) UUIDs exactly. The appliance's marginal RF link
+      (−95 to −101 dBm) means not every trial completes within a fixed
+      window — genuine link failures (`BLE_HS_ENOTCONN`, `BLE_HS_EBADDATA`)
+      are reported cleanly through `ConnectionFailed` with no crash,
+      corruption, or hang, exactly as this milestone's error-handling scope
+      requires.
+
+## M6 — Grohe Blue control
 
 Depends on the BLE/GATT contract of the target appliance being defined.
 
-- [ ] Connect to the appliance discovered in M4, then GATT service/
-      characteristic discovery.
 - [ ] Read appliance state (mode, filter status, whatever the real device
       exposes) over BLE and reflect it in the UI.
 - [ ] Write commands from the dial (encoder + button) back to the
@@ -148,7 +183,7 @@ Depends on the BLE/GATT contract of the target appliance being defined.
 - [ ] Error/timeout handling for a lost or rejected connection, plus
       reconnect/backoff.
 
-## M6 — Product polish
+## M7 — Product polish
 
 - [ ] Settings persistence (NVS) — last-used mode, pairing info, etc.
 - [ ] OTA updates.
