@@ -125,6 +125,14 @@ bool DialController::HandleApplianceState(
   return true;
 }
 
+bool DialController::HandleTimeStatus(bool available) {
+  if (state_.time_available == available) {
+    return false;
+  }
+  state_.time_available = available;
+  return true;
+}
+
 grohe_ble::WaterType ToGroheWaterType(dial_state::WaterType type) {
   switch (type) {
     case dial_state::WaterType::kStill:

@@ -160,6 +160,39 @@ boot screen with a real dial UI) without touching one another.
   future code that updates the UI from the main task (e.g. in response to a
   BLE event or an encoder turn) must follow the same pattern.
 
+## Flash layout (M9)
+
+Verified against the real hardware (`esptool flash_id`), not assumed from
+Kconfig: this board's ESP32-C3 has 4 MB of embedded flash. Through M8, the
+project used ESP-IDF's built-in `partitions_singleapp_large.csv` (a single
+1500K `factory` app partition) — comfortable until M9 added Wi-Fi/lwIP/
+WPA-supplicant, which alone cost ~448 KB of image size and left that
+partition at 2% free. A custom `partitions.csv` (`CONFIG_PARTITION_TABLE_CUSTOM`)
+replaces it:
+
+```
+nvs,        data, nvs,     ,        0x6000   (24K, unchanged)
+otadata,    data, ota,     ,        0x2000   (8K, fixed by ESP-IDF's OTA data format)
+phy_init,   data, phy,     ,        0x1000   (4K, unchanged)
+ota_0,      app,  ota_0,   ,        1984K
+ota_1,      app,  ota_1,   ,        1984K
+```
+
+Two equal, 64K-aligned `ota_0`/`ota_1` slots rather than a single, larger
+`factory` partition — even though OTA isn't implemented yet — because a
+single-slot layout can never be safely OTA-updated later (a failed/
+corrupted write would overwrite the only running image), and this
+project's own history (Wi-Fi's one-time ~448 KB jump) shows flash usage can
+move in large, lumpy steps. Adopting the OTA-ready shape now, before any
+real field data lives in NVS, avoids a second, disruptive partition
+migration whenever OTA (an explicit product-roadmap item) actually ships;
+`idf.py flash` already writes into `ota_0` exactly as `factory` would have,
+so no OTA code is required for this table to work today. At the current
+image size (~1465 KB), each slot has ~519 KB of headroom — comparable to
+what the original single-partition table had before the Wi-Fi addition,
+just doubled up safely. See `partitions.csv`'s own comment for the exact
+sizing arithmetic.
+
 ## Why GPIO-ISR (not PCNT) for the encoder
 
 The rotary encoder is decoded in software via GPIO edge interrupts, not the
@@ -433,31 +466,107 @@ recalibration only touches this one class. `DialController::Tick()`,
 called every `App::Run()` iteration, checks `Finished()` against
 `esp_timer_get_time()` and returns to `Idle` once it fires.
 
-**No real-time clock — a genuine production gap, found during M8 hardware
-validation, not a code defect**: `GroheClient::SendCommand()` uses
-`time(nullptr)` for the payload's timestamp field, but this firmware has no
-RTC, SNTP, or any other real time source, so that call returns seconds
-since boot, not a real Unix epoch. On real hardware this made the
-appliance reject every command with `TIMESTAMP_EXPIRED` (code 2) — which
-is itself useful evidence: getting `TIMESTAMP_EXPIRED` rather than
-`INVALID_HMAC` confirms the credentials/HMAC pipeline is correct, and only
-the timestamp is wrong. Substituting a real epoch (hardcoded, temporarily,
-for validation only — never committed) immediately produced genuine
-`SUCCESS` responses and real physical dispenses, confirming the entire
-authenticated-write pipeline end to end. **Before this firmware can send
-authenticated commands in real use, it needs an actual time source** —
-SNTP (would need Wi-Fi, which this project deliberately doesn't have) or a
-timestamp supplied by whatever eventually pairs with it (e.g. a
-Home Assistant integration). This is out of scope for M8 and is not yet
-tracked as its own milestone.
+**Time architecture (M9)** — replaces M8's temporary finding. M8's hardware
+validation established that `time(nullptr)` returns seconds-since-boot on
+this firmware (no RTC, no prior time source), which made every command
+fail with `TIMESTAMP_EXPIRED`; substituting a real epoch (temporarily, for
+that validation only, never committed) confirmed the credentials/HMAC
+pipeline was otherwise correct. M9 replaces that gap with a genuine
+production time source, behind a `TimeProvider` abstraction (new component
+`components/time_service/`) so `GroheProtocol` never knows or cares where
+the value came from:
 
-**Five hardware-discovered robustness issues in total across M5 through M7, all
+```cpp
+class TimeProvider {
+ public:
+  virtual bool IsValid() const = 0;
+  virtual bool GetCurrentEpoch(uint32_t* out_epoch_seconds) const = 0;
+};
+```
+
+`BuildDispensePayload()`/`BuildStopPayload()` (`grohe_protocol.hpp`) take a
+`const TimeProvider&` instead of a raw timestamp, and call
+`GetCurrentEpoch()` themselves; a `false` return is handled exactly like
+an HMAC/buffer failure already was — reject the command, leave the output
+buffer untouched, never fabricate a value. `time_provider.hpp` is the only
+`time_service` header `grohe_protocol.hpp` includes.
+
+*Chosen source: SNTP over Wi-Fi, one-shot.* This firmware has no RTC chip
+and no existing Home Assistant (or other product) integration to source
+time from — `grohe_blue_ble/docs/TODO.md`'s "Milestone 5 — Home Assistant"
+is an unimplemented *future* idea for the *Python* library, not something
+this firmware talks to. `SntpTimeProvider` connects to Wi-Fi once at boot,
+syncs via SNTP, then **fully tears Wi-Fi/lwIP back down** —
+`esp_wifi_stop()`/`esp_wifi_deinit()`/`esp_netif_destroy()` — so Wi-Fi is
+never a runtime dependency for anything else: the dial, BLE, and appliance
+control all keep working exactly as before whether or not this ever
+succeeds. Once synced, `time(nullptr)` keeps advancing correctly for the
+rest of the session from the same tick source used elsewhere in this
+codebase, confirmed on hardware across several dispense/stop commands
+issued tens of seconds apart with monotonically increasing, genuine
+timestamps.
+
+*Entirely event-driven, no dedicated task.* `esp_event`'s default loop
+already runs on its own internal task; Wi-Fi/IP events
+(`WIFI_EVENT_STA_START`/`DISCONNECTED`, `IP_EVENT_STA_GOT_IP`) and SNTP's
+own sync-notification callback drive every state transition, mirroring how
+`BleManager` itself never spawns a task to poll NimBLE — it reacts to
+NimBLE's own callbacks. The one wrinkle: SNTP's notification callback runs
+on lwIP's own task, and the timeout `esp_timer` callback runs on
+`esp_timer`'s own service task — neither is the same task WIFI_EVENT/
+IP_EVENT handlers run on. Rather than adding a mutex, both re-post as a
+custom event (`kInternalEventBase`) onto the *same* default event loop, so
+`esp_event`'s own guarantee (every handler on one loop is serialized on
+that loop's single task) means every piece of mutable state this class has
+— retry counter, torn-down flag — is genuinely touched from one task only,
+without its own lock. `valid_` is the sole exception: a `std::atomic<bool>`,
+the one field actually read from a different task (the app task, via
+`IsValid()`/`GetCurrentEpoch()`) — the same minimal, well-justified
+reasoning already applied to `BleManager::conn_handle_` in M7.
+
+*Credentials*: `WifiCredentialsProvider`/`LocalWifiCredentialsProvider`
+mirror `grohe_ble`'s `CredentialsProvider`/`LocalCredentialsProvider`
+exactly (gitignored local header + committed `.example`), injected into
+`SntpTimeProvider` by reference rather than owned internally, so a future
+NVS- or Wi-Fi-provisioning-based implementation only requires writing a
+new provider and changing one construction line in `GroheClient`.
+
+*Failure handling*: a Wi-Fi/SNTP failure — wrong credentials, AP out of
+range, SNTP server unreachable — never blocks or crashes anything else; it
+just means `IsValid()` stays false, `GroheClient::HasValidTime()` reports
+it, and `DialController`/`UiManager` show `"NO TIME"` (reusing the
+existing appliance-status label, ahead of the normal `APPL ...` readout,
+since it explains *why* nothing will authenticate). A hardware-confirmed
+bug during self-review: `esp_wifi_connect()` can fail *synchronously*
+(`ESP_ERR_WIFI_SSID` for an empty/invalid SSID, confirmed with placeholder
+credentials) without ever firing `WIFI_EVENT_STA_DISCONNECTED` — if left
+unchecked, this would have left Wi-Fi/lwIP resources allocated for the
+entire session instead of tearing down immediately. Fixed by checking
+`esp_wifi_connect()`'s own return value and tearing down right away on a
+synchronous failure, not just an asynchronous disconnect.
+
+*RF coexistence and RAM, both checked, not assumed*: the Grohe appliance's
+BLE link is already marginal (−95 to −101 dBm since M5); pre-M9 hardware
+logs already show roughly a 64% connection/discovery failure rate
+independent of Wi-Fi (14 of 22 trials across M5–M8), so a single M9 trial
+failing during the Wi-Fi sync window is within that existing variance, not
+evidence of new interference — confirmed by running several more trials
+with real Wi-Fi credentials, all completing BLE discovery/subscribe and
+SNTP sync successfully with no crashes. Separately, linking Wi-Fi/lwIP/
+WPA-supplicant in at all costs real, static RAM regardless of whether a
+sync ever runs — the heap available before any runtime allocation dropped
+from 121 KiB (M8) to 53 KiB — confirmed this is enough headroom for BLE
+connect/discovery/dispense to keep working by testing repeated dispense
+commands on real hardware after the change, not by assuming it would fit.
+
+**Six hardware-discovered robustness issues in total across M5 through M9, all
 found and fixed via repeated real-device trials, not by inspection alone**
 (the appliance's signal is weak — around −95 to −101 dBm in M5's original
 test conditions — which is what exposed the first two; the next two were
 found later, at much better signal, purely from careful boundary reasoning
-not matching a working reference closely enough; the fifth is an
-initialization-order bug unrelated to RF conditions):
+not matching a working reference closely enough; the fifth and sixth are
+each unrelated to RF conditions — an initialization-order bug and an
+unchecked return value, respectively):
 1. ESP-IDF's bundled NimBLE fork autonomously reattempts a connection that
    fails immediately after being established (logged as `NimBLE: Reattempt
    connection; reason = 0x3e`, gated by `MYNEWT_VAL(BLE_ENABLE_CONN_REATTEMPT)`
@@ -516,6 +625,16 @@ initialization-order bug unrelated to RF conditions):
    wasn't obviously a NimBLE call by name. Fixed by moving the
    `ble_npl_event_init()` call to immediately after `nimble_port_init()`
    succeeds.
+6. `SntpTimeProvider`'s `WIFI_EVENT_STA_START` handler called
+   `esp_wifi_connect()` without checking its return value. With the
+   placeholder empty Wi-Fi credentials, this failed *synchronously*
+   (`ESP_ERR_WIFI_SSID`) and never fired `WIFI_EVENT_STA_DISCONNECTED` —
+   the only event the retry/give-up logic was watching for — so nothing
+   would ever have torn Wi-Fi/lwIP back down; confirmed on hardware by the
+   complete absence of any further Wi-Fi log activity after the initial
+   connect attempt. Fixed by checking `esp_wifi_connect()`'s own return
+   value at both call sites and tearing down immediately on a synchronous
+   failure, not only on an asynchronous disconnect.
 
 **Detection strategy**: the appliance is identified solely by the 128-bit
 service UUID it advertises (`kGroheServiceUuid`), matched against the

@@ -86,6 +86,12 @@ class DialController {
   [[nodiscard]] bool HandleApplianceState(
       const grohe_ble::ApplianceState& appliance_state);
 
+  // Translates GroheClient::HasValidTime() into DialState's own plain
+  // field (M9) -- same "dial_state has no dependency on grohe_ble/
+  // time_service" bridging role as HandleApplianceState(). Returns true if
+  // anything actually changed.
+  [[nodiscard]] bool HandleTimeStatus(bool available);
+
   [[nodiscard]] const dial_state::DialState& State() const { return state_; }
 
  private:

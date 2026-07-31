@@ -1,0 +1,30 @@
+# Name,     Type, SubType, Offset,  Size, Flags
+#
+# OTA-ready layout on this board's confirmed 4MB embedded flash (verified via
+# `esptool flash_id`, not assumed from Kconfig -- see docs/ARCHITECTURE.md's
+# "Flash layout" section for the full review this replaced the built-in
+# partitions_singleapp_large.csv table with).
+#
+# Two equal app slots (ota_0/ota_1) + otadata rather than a single `factory`
+# partition: a single-slot layout can't be safely OTA-updated later (a
+# failed/corrupted write would overwrite the only running image), and this
+# project's own M9 milestone just added ~448 KB to the app image in one
+# step (Wi-Fi/lwIP/WPA-supplicant) -- moving to two slots now, before any
+# real field data lives in NVS, avoids a second, disruptive migration once
+# OTA (an explicit product-roadmap item) is actually implemented. Until
+# then, `idf.py flash` simply writes into ota_0 exactly like `factory`
+# would have; no OTA code is required for this table to work today.
+#
+# Sizing: 4096K total flash, minus ~36K for the bootloader/partition-table
+# region, nvs (24K, unchanged from the previous table), otadata (8K, fixed
+# by ESP-IDF's OTA data format) and phy_init (4K) leaves 4024K for the two
+# app slots. Split evenly and rounded down to the nearest 64K-aligned
+# boundary (clean erase-sector alignment) gives 1984K each, with 56K left
+# over as slack. At the current app size (1500160 bytes, ~1465K), each slot
+# has ~519K of headroom -- comparable to what the single-partition table
+# had before this milestone's Wi-Fi addition, just doubled up safely.
+nvs,        data, nvs,     ,        0x6000
+otadata,    data, ota,     ,        0x2000
+phy_init,   data, phy,     ,        0x1000
+ota_0,      app,  ota_0,   ,        1984K
+ota_1,      app,  ota_1,   ,        1984K

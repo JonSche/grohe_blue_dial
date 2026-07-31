@@ -105,7 +105,12 @@ void UiManager::Render(const dial_state::DialState& state) {
                          ? "PRESS TO POUR"
                          : "PRESS TO STOP");
 
-  if (!state.appliance_response_received) {
+  // M9: "NO TIME" takes priority over the appliance-response readout below
+  // -- it explains *why* no command will authenticate, which is more
+  // useful than a stale "APPL --" while nothing has been sent yet.
+  if (!state.time_available) {
+    lv_label_set_text(appliance_status_label_, "NO TIME");
+  } else if (!state.appliance_response_received) {
     lv_label_set_text(appliance_status_label_, "APPL --");
   } else if (state.appliance_response_success) {
     lv_label_set_text(appliance_status_label_, "APPL OK");

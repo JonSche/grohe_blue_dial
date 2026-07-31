@@ -1,7 +1,6 @@
 #include "grohe_ble/grohe_client.hpp"
 
 #include <cstring>
-#include <ctime>
 
 #include "esp_log.h"
 
@@ -10,7 +9,20 @@ namespace {
 constexpr char kTag[] = "grohe_client";
 }  // namespace
 
-esp_err_t GroheClient::Init() { return ble_manager_.Init(); }
+esp_err_t GroheClient::Init() {
+  // Non-fatal, same reasoning as BleManager's own failures below: a Wi-Fi/
+  // SNTP problem must not take down BLE, the display, or the encoder. Time
+  // and BLE are independent, so order between the two Init() calls doesn't
+  // matter functionally -- starting the (non-blocking, event-driven) time
+  // sync first just gives it the most possible head start before a command
+  // is ever likely to be sent.
+  const esp_err_t time_err = time_provider_.Init();
+  if (time_err != ESP_OK) {
+    ESP_LOGE(kTag, "SntpTimeProvider::Init() failed: %s",
+             esp_err_to_name(time_err));
+  }
+  return ble_manager_.Init();
+}
 
 void GroheClient::Poll(const std::function<void(const BleEvent&)>& on_event) {
   ble_manager_.PollEvents([this, &on_event](const BleEvent& event) {
@@ -70,13 +82,16 @@ bool GroheClient::SendCommand(PendingCommand kind, int amount_ml,
   char payload[kMaxStopPayloadSize];
   const bool built =
       (kind == PendingCommand::kStop)
-          ? BuildStopPayload(credentials_provider_.Get(),
-                             static_cast<uint32_t>(time(nullptr)), payload,
-                             sizeof(payload))
+          ? BuildStopPayload(credentials_provider_.Get(), time_provider_,
+                             payload, sizeof(payload))
           : BuildDispensePayload(credentials_provider_.Get(), amount_ml,
-                                 taste, static_cast<uint32_t>(time(nullptr)),
-                                 payload, sizeof(payload));
+                                 taste, time_provider_, payload,
+                                 sizeof(payload));
   if (!built) {
+    // Covers both an HMAC/buffer failure and "no valid time available yet"
+    // (M9) -- BuildDispensePayload()/BuildStopPayload() don't distinguish
+    // the reason at this level, and this class already rejects a command
+    // the same way regardless of which it was.
     ESP_LOGE(kTag, "failed to build command payload");
     return false;
   }

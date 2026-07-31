@@ -6,6 +6,8 @@
 #include "grohe_ble/ble_manager.hpp"
 #include "grohe_ble/grohe_credentials.hpp"
 #include "grohe_ble/grohe_protocol.hpp"
+#include "time_service/sntp_time_provider.hpp"
+#include "time_service/wifi_credentials.hpp"
 
 namespace grohe_ble {
 
@@ -68,6 +70,13 @@ class GroheClient {
   // arrived since the last call -- see CommandOutcome's own comment.
   [[nodiscard]] CommandOutcome TakeCommandOutcome();
 
+  // Whether a valid Unix epoch is currently available (M9) -- surfaced so
+  // App/DialController can show a clear "NO TIME" status rather than
+  // silently rejecting every command. Does not itself gate SendCommand();
+  // BuildDispensePayload()/BuildStopPayload() already reject on this via
+  // TimeProvider::GetCurrentEpoch(), this is purely for display.
+  [[nodiscard]] bool HasValidTime() const { return time_provider_.IsValid(); }
+
  private:
   enum class PendingCommand { kNone, kDispense, kStop };
 
@@ -82,6 +91,17 @@ class GroheClient {
   BleManager ble_manager_;
   GroheProtocol protocol_;
   LocalCredentialsProvider credentials_provider_;
+
+  // M9: time_provider_ is injected with wifi_credentials_provider_ by
+  // reference (not owned internally by SntpTimeProvider) so a future
+  // WifiCredentialsProvider implementation (NVS, Wi-Fi provisioning, ...)
+  // only requires changing this one construction line -- see
+  // time_service/wifi_credentials.hpp's own comment. Declared in this
+  // order so wifi_credentials_provider_ is fully constructed before
+  // time_provider_'s constructor runs (member init order follows
+  // declaration order in C++, not the mem-initializer-list order below).
+  time_service::LocalWifiCredentialsProvider wifi_credentials_provider_;
+  time_service::SntpTimeProvider time_provider_{wifi_credentials_provider_};
 
   // Gate for SendCommand(): both become true independently and in no
   // guaranteed order (hardware evidence shows ReadyForProtocol can fire

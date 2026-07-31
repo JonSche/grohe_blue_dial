@@ -61,7 +61,7 @@ just logging.
       out of scope for this milestone.
 - [ ] Real product decision on whether this is the final screen layout, or
       just the first cut -- this milestone is deliberately a single static
-      screen, no menus/pages (see M9/M10 for BLE-driven content and visual
+      screen, no menus/pages (see M10/M11 for BLE-driven content and visual
       polish).
 
 ## M3 — BLE client foundation
@@ -314,21 +314,63 @@ dispensing" for testing and emergency cancellation.
       clock" section — production use needs a real time source before
       this milestone's own commands will succeed outside a lab setting.
 
-## M9 — Grohe Blue control
+## M9 — Time Foundation ✅
 
-- [ ] A real time source (SNTP or a value supplied by whatever eventually
-      pairs with this firmware, e.g. Home Assistant) — required before
-      authenticated commands succeed outside a temporary hardcoded
-      timestamp; found as a gap during M8 hardware validation.
+M8's hardware validation found that authenticated commands only succeeded
+with a temporary, hardcoded Unix epoch (never committed) -- this firmware
+had no real time source at all. M9 replaces that gap with a genuine
+production time source: SNTP over Wi-Fi, connected once at boot and fully
+torn down again afterward, so Wi-Fi is never a runtime dependency for
+anything else (BLE/appliance control and the UI all keep working exactly
+as before whether or not it ever succeeds) -- an explicit product
+requirement (any future Home Assistant integration stays optional, not a
+dependency this milestone introduces).
+
+- [x] New `components/time_service/`: an abstract `TimeProvider`
+      (`IsValid()`/`GetCurrentEpoch()`) so `GroheProtocol` never knows
+      where the value comes from, plus `SntpTimeProvider` -- entirely
+      event-driven (no dedicated task, no blocking wait; mirrors how
+      `BleManager` itself reacts to NimBLE's own callbacks rather than
+      polling) -- and `WifiCredentialsProvider`/`LocalWifiCredentialsProvider`,
+      mirroring `grohe_ble`'s own `CredentialsProvider` pattern exactly
+      (gitignored local header + committed `.example`).
+- [x] `BuildDispensePayload()`/`BuildStopPayload()` take a `TimeProvider&`
+      instead of a raw timestamp; a time-unavailable result is rejected
+      exactly like an HMAC/buffer failure already was -- never fabricated.
+- [x] `DialController`/`UiManager` show a `"NO TIME"` status (reusing the
+      existing appliance-status label) whenever authenticated commands
+      can't succeed yet, ahead of the normal appliance-response readout.
+- [x] Two real hardware-discovered bugs found and fixed during self-review
+      (see [ARCHITECTURE.md](ARCHITECTURE.md#ble-grohe_ble)): an unchecked
+      `esp_wifi_connect()` return value that would have leaked Wi-Fi/lwIP
+      resources for the entire session on a synchronous connect failure,
+      and a flash partition table left with only 2% free after Wi-Fi's
+      ~448 KB image-size cost -- addressed with a custom, OTA-ready
+      partition table (see [ARCHITECTURE.md](ARCHITECTURE.md#flash-layout-m9))
+      rather than just enlarging the old single-partition layout, so OTA
+      (M11) never needs a second, disruptive migration.
+- [x] Verified on hardware with real Wi-Fi credentials: SNTP sync
+      succeeds and tears down cleanly; BLE connection/discovery success
+      rate showed no regression versus the existing ~64% baseline failure
+      rate on this appliance's already-marginal RF link (M5-M8); repeated
+      dispense/stop commands issued tens of seconds apart all produced
+      genuine `SUCCESS` responses with correctly advancing real
+      timestamps; confirmed no temporary/hardcoded timestamp code
+      remains anywhere in the diff.
+
+## M10 — Grohe Blue control
+
 - [ ] Broader water-type selection (beyond the existing still/sparkling
       toggle), if the product direction calls for it.
 - [ ] Error/timeout handling for a lost or rejected connection, plus
       reconnect/backoff.
 
-## M10 — Product polish
+## M11 — Product polish
 
 - [ ] Settings persistence (NVS) — last-used mode, pairing info, etc.
-- [ ] OTA updates.
+- [ ] OTA updates -- the partition table (M9) is already OTA-ready
+      (`ota_0`/`ota_1` + `otadata`); this item is the `esp_https_ota`
+      integration itself.
 - [ ] Power/sleep management appropriate for a countertop device.
 - [ ] Real visual design pass on `ui/` (the M1 boot screen is a
       placeholder, not the intended final look).

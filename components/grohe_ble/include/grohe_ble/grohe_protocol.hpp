@@ -4,6 +4,7 @@
 
 #include "grohe_ble/ble_manager.hpp"
 #include "grohe_ble/grohe_credentials.hpp"
+#include "time_service/time_provider.hpp"
 
 // Interprets the raw GATT data BleManager reports (see BleCharacteristicEvent)
 // as the Grohe Blue application protocol: which characteristic is which,
@@ -45,6 +46,15 @@
 // marker. PredictDispenseDurationMs() ports the Python reference's own
 // empirically-measured physical-dispense-duration model -- see its own
 // comment for the source and validated range.
+//
+// M9 scope: BuildDispensePayload()/BuildStopPayload() no longer take a raw
+// timestamp -- they take a time_service::TimeProvider& and call
+// GetCurrentEpoch() on it themselves. This is the one place GroheProtocol
+// touches time_service, and only through its abstract interface (see
+// time_provider.hpp) -- it has no idea whether the real implementation is
+// SNTP-based, NVS-backed, or anything else. A time-unavailable result is
+// handled exactly like an HMAC/buffer failure already was: return false,
+// leave `out` untouched, no fabricated timestamp.
 namespace grohe_ble {
 
 // The appliance's one confirmed protocol response, decoded from a
@@ -90,21 +100,22 @@ inline constexpr size_t kMaxStopPayloadSize =
 // (in turn DispenseCommand.hmac_message + serialize_payload()):
 // HMAC-SHA256-signed "userId:timestamp:amountMl:taste:base64(hmac)". Returns
 // false (leaving `out` untouched) if any stage fails: the message or final
-// payload doesn't fit in the given buffers, or credential decoding/HMAC
-// computation fails (see grohe_auth.hpp) -- never partially writes `out` in
-// that case. This is the one payload-building path for both a real dispense
-// and stop() (see BuildStopPayload() below) -- there is no separate,
-// duplicated serialization for either.
+// payload doesn't fit in the given buffers, credential decoding/HMAC
+// computation fails (see grohe_auth.hpp), or `time_provider` has no valid
+// time available (see time_provider.hpp -- never fabricated) -- never
+// partially writes `out` in that case. This is the one payload-building
+// path for both a real dispense and stop() (see BuildStopPayload() below)
+// -- there is no separate, duplicated serialization for either.
 [[nodiscard]] bool BuildDispensePayload(const Credentials& credentials,
                                         int amount_ml, WaterType taste,
-                                        uint32_t timestamp, char* out,
-                                        size_t out_size);
+                                        const time_service::TimeProvider& time_provider,
+                                        char* out, size_t out_size);
 
 // The confirmed stop command -- protocol.py's stop_command(): amount=0,
 // taste=0, otherwise identical to BuildDispensePayload().
 [[nodiscard]] bool BuildStopPayload(const Credentials& credentials,
-                                    uint32_t timestamp, char* out,
-                                    size_t out_size);
+                                    const time_service::TimeProvider& time_provider,
+                                    char* out, size_t out_size);
 
 // Predicts physical dispense duration (from the SUCCESS acknowledgement to
 // the appliance fully stopping), in milliseconds, for a given amount.

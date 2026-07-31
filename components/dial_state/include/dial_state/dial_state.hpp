@@ -34,6 +34,14 @@ struct DialState {
   bool appliance_response_received = false;
   bool appliance_response_success = false;
   int appliance_response_code = 0;  // Meaningful only if received above.
+
+  // Whether a valid Unix epoch is currently available (M9) -- translated
+  // from grohe_ble::GroheClient::HasValidTime(), same "no time_service
+  // dependency here" reasoning as appliance_response_* above. False means
+  // every authenticated command will be rejected until it becomes true;
+  // ui::UiManager shows this ahead of the appliance response, since it
+  // explains why nothing will authenticate.
+  bool time_available = false;
 };
 
 inline constexpr int kMinAmountMl = 100;

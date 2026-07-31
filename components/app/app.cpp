@@ -84,6 +84,9 @@ void App::Run() {
             grohe_client_.TakeCommandOutcome())) {
       state_changed = true;
     }
+    if (dial_controller_.HandleTimeStatus(grohe_client_.HasValidTime())) {
+      state_changed = true;
+    }
     if (dial_controller_.Tick()) {
       state_changed = true;
     }

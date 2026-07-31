@@ -148,8 +148,14 @@ constexpr double kTimePerMlSec = 0.0403;
 }  // namespace
 
 bool BuildDispensePayload(const Credentials& credentials, int amount_ml,
-                         WaterType taste, uint32_t timestamp, char* out,
-                         size_t out_size) {
+                         WaterType taste,
+                         const time_service::TimeProvider& time_provider,
+                         char* out, size_t out_size) {
+  uint32_t timestamp = 0;
+  if (!time_provider.GetCurrentEpoch(&timestamp)) {
+    return false;
+  }
+
   // protocol.py's DispenseCommand.hmac_message: "userId:timestamp:amount:taste".
   char message[kMaxHmacMessageSize];
   const int message_len = std::snprintf(
@@ -181,11 +187,12 @@ bool BuildDispensePayload(const Credentials& credentials, int amount_ml,
   return written >= 0 && static_cast<size_t>(written) < out_size;
 }
 
-bool BuildStopPayload(const Credentials& credentials, uint32_t timestamp,
+bool BuildStopPayload(const Credentials& credentials,
+                     const time_service::TimeProvider& time_provider,
                      char* out, size_t out_size) {
   // protocol.py's stop_command(): amount=0, taste=0.
-  return BuildDispensePayload(credentials, 0, WaterType::kUnknown, timestamp,
-                             out, out_size);
+  return BuildDispensePayload(credentials, 0, WaterType::kUnknown,
+                             time_provider, out, out_size);
 }
 
 uint32_t PredictDispenseDurationMs(int amount_ml) {
