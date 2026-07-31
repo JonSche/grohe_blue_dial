@@ -32,6 +32,13 @@ void App::Run() {
 
   ESP_ERROR_CHECK(encoder_input_.Init());
 
+  // BLE is not allowed to take the rest of the firmware down with it: the
+  // dial still has to work (display, encoder, UI) even if the radio never
+  // comes up, so this is a log, not an ESP_ERROR_CHECK.
+  if (grohe_client_.Init() != ESP_OK) {
+    ESP_LOGE(kTag, "GroheClient::Init() failed -- continuing without BLE");
+  }
+
   ESP_LOGI(kTag, "Startup complete");
 
   for (;;) {
@@ -39,6 +46,17 @@ void App::Run() {
     encoder_input_.Poll([this, &state_changed](encoder::EncoderEvent event) {
       dial_controller_.HandleEvent(event);
       state_changed = true;
+    });
+
+    // Log-only: BLE has nothing to say about DialState yet (M5 connects
+    // and discovers the appliance's GATT hierarchy; it doesn't speak the
+    // protocol yet) -- see grohe_ble/grohe_client.hpp. M6 replaces this
+    // lambda's body with a call into DialController, the same way the
+    // encoder callback above already does; nothing about this loop's
+    // shape needs to change then.
+    grohe_client_.Poll([](const grohe_ble::BleEvent& event) {
+      ESP_LOGI(kTag, "BLE event: %s (reason=%d)",
+               grohe_ble::ToString(event.type), event.reason);
     });
 
     if (state_changed) {

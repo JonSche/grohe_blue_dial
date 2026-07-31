@@ -129,27 +129,31 @@ esp_err_t Gc9a01Display::Init() {
   ESP_LOGI(kTag, "Starting self-owned LVGL v9 integration");
   lv_init();
 
-  // Single full-frame buffer, matching the vendor project's lvgl_port.c
-  // buf_size (LCD_H_RES*LCD_V_RES) and the same MALLOC_CAP flags
-  // esp_lvgl_port used for this panel type. Allocated here, before the LVGL
-  // task exists, matching the vendor's own ordering.
+  // Small row-based partial buffer, not a full-screen framebuffer: neither
+  // LVGL, the GC9A01 (which has its own GRAM and full CASET/RASET windowed-
+  // write support -- see lcd_panel_gc9a01.c), nor this UI's mostly-static,
+  // small-widget rendering pattern requires the MCU to hold a full 240x240
+  // frame at once (see docs/ARCHITECTURE.md and the M3.2 architecture
+  // review). LV_DISPLAY_RENDER_MODE_PARTIAL computes buffer height as
+  // buf_size / stride (lv_display.c), so kPartialBufRows directly controls
+  // how many full-width rows this buffer covers. 30 rows (of LVGL's
+  // recommended >=1/10-screen minimum) keeps the allocation two orders of
+  // magnitude smaller than the old 115200-byte full frame, comfortably
+  // within every DMA-capable heap region measured in the BLE RCA.
   //
-  // Single-buffered, not double-buffered like the vendor: this chip's DMA-
-  // capable heap has two separate contiguous free blocks at boot, and the
-  // second is a few hundred bytes short of a second full frame regardless
-  // of boot-time config. LV_DISPLAY_RENDER_MODE_FULL supports a NULL second
-  // buffer -- LVGL simply waits for the single buffer's flush to complete
-  // before rendering the next frame, which has no practically visible cost
-  // for this mostly-static round-dial UI.
+  // Single-buffered, as before: LVGL simply waits for this (now much
+  // smaller and faster) buffer's flush to complete before rendering the
+  // next chunk, which remains imperceptible for this UI.
+  constexpr uint32_t kPartialBufRows = 30;
   const uint32_t hres = static_cast<uint32_t>(board::kLcdHorizontalResolution);
   const uint32_t vres = static_cast<uint32_t>(board::kLcdVerticalResolution);
-  const size_t buffer_size_bytes = hres * vres * sizeof(uint16_t);
+  const size_t buffer_size_bytes = kPartialBufRows * hres * sizeof(uint16_t);
   constexpr uint32_t kBufCaps =
       MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 
   lv_buf_ = heap_caps_malloc(buffer_size_bytes, kBufCaps);
   if (lv_buf_ == nullptr) {
-    ESP_LOGE(kTag, "framebuffer allocation failed (%u bytes)",
+    ESP_LOGE(kTag, "draw buffer allocation failed (%u bytes)",
              static_cast<unsigned>(buffer_size_bytes));
     return ESP_FAIL;
   }
@@ -168,7 +172,7 @@ esp_err_t Gc9a01Display::Init() {
   // RGB565_SWAPPED is the per-display equivalent.
   lv_display_set_color_format(lv_display_, LV_COLOR_FORMAT_RGB565_SWAPPED);
   lv_display_set_buffers(lv_display_, lv_buf_, nullptr, buffer_size_bytes,
-                          LV_DISPLAY_RENDER_MODE_FULL);
+                          LV_DISPLAY_RENDER_MODE_PARTIAL);
   lv_display_set_user_data(lv_display_, panel_);
   lv_display_set_flush_cb(lv_display_, FlushCbTrampoline);
 
