@@ -15,6 +15,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "nvs_flash.h"
+#include "os/os_mbuf.h"
 #include "services/gap/ble_svc_gap.h"
 
 namespace grohe_ble {
@@ -24,6 +25,33 @@ constexpr char kDeviceName[] = "grohe-dial";
 // Events are rare (a handful of state changes, not a data stream), so a
 // small bounded depth is generous, not tight.
 constexpr UBaseType_t kEventQueueDepth = 8;
+// A full discovery pass reports 5 characteristics on this appliance's own
+// hierarchy (confirmed on hardware in M5), all enqueued in a short burst
+// well before the app task's next 20ms poll -- sized comfortably above
+// that so a fast discovery pass can never fill this queue before it's
+// drained.
+constexpr UBaseType_t kCharacteristicQueueDepth = 16;
+
+// The standard Client Characteristic Configuration Descriptor UUID
+// (0x2902), used to find where to write to enable notifications. This one
+// genuinely is 16-bit on the wire on this device -- confirmed directly via
+// this class's own descriptor-discovery log (ble_uuid_to_str() rendered it
+// as "0x2902", the short form, which only happens for BLE_UUID_TYPE_16;
+// see FormatServiceUuids()/HandleDscDisc() for the same rendering rule
+// applied elsewhere). Bleak/CoreBluetooth separately reports this same
+// descriptor as the expanded 128-bit string
+// "00002902-0000-1000-8000-00805f9b34fb" -- that's CoreBluetooth's own
+// higher-level API normalizing every UUID to 128-bit *for display*,
+// regardless of the actual over-the-air encoding, and is not evidence
+// about wire type the way it was for kGroheReadCharUuid/kGroheWriteCharUuid
+// in ble_constants.hpp (those really are 128-bit on the wire, confirmed
+// independently by this same class's own characteristic-discovery log).
+constexpr ble_uuid16_t kCccdUuid = BLE_UUID16_INIT(BLE_GATT_DSC_CLT_CFG_UUID16);
+
+// Client Characteristic Configuration Descriptor value that enables
+// notifications (bit 0) without indications (bit 1) -- see Bluetooth Core
+// Spec, the CCCD's own definition.
+constexpr uint8_t kEnableNotificationsValue[2] = {0x01, 0x00};
 
 // Scan interval and window are set to this same value, giving a continuous
 // (100% duty cycle) scan -- see StartScan().
@@ -205,6 +233,10 @@ BleManager::~BleManager() {
     vQueueDelete(event_queue_);
     event_queue_ = nullptr;
   }
+  if (characteristic_queue_ != nullptr) {
+    vQueueDelete(characteristic_queue_);
+    characteristic_queue_ = nullptr;
+  }
   if (instance_ == this) {
     instance_ = nullptr;
   }
@@ -228,6 +260,13 @@ esp_err_t BleManager::Init() {
   event_queue_ = xQueueCreate(kEventQueueDepth, sizeof(BleEvent));
   if (event_queue_ == nullptr) {
     ESP_LOGE(kTag, "xQueueCreate failed");
+    return ESP_ERR_NO_MEM;
+  }
+
+  characteristic_queue_ = xQueueCreate(kCharacteristicQueueDepth,
+                                       sizeof(BleCharacteristicEvent));
+  if (characteristic_queue_ == nullptr) {
+    ESP_LOGE(kTag, "xQueueCreate (characteristic) failed");
     return ESP_ERR_NO_MEM;
   }
 
@@ -267,6 +306,17 @@ void BleManager::PollEvents(const std::function<void(const BleEvent&)>& on_event
   }
 }
 
+void BleManager::PollCharacteristicEvents(
+    const std::function<void(const BleCharacteristicEvent&)>& on_event) {
+  if (characteristic_queue_ == nullptr) {
+    return;
+  }
+  BleCharacteristicEvent event;
+  while (xQueueReceive(characteristic_queue_, &event, 0) == pdTRUE) {
+    on_event(event);
+  }
+}
+
 void BleManager::SetState(BleState state) {
   ESP_LOGI(kTag, "state: %s -> %s", ToString(state_), ToString(state));
   state_ = state;
@@ -278,6 +328,15 @@ void BleManager::Enqueue(const BleEvent& event) {
   }
   if (xQueueSend(event_queue_, &event, 0) != pdTRUE) {
     ESP_LOGW(kTag, "event queue full, dropping %s", ToString(event.type));
+  }
+}
+
+void BleManager::EnqueueCharacteristic(const BleCharacteristicEvent& event) {
+  if (characteristic_queue_ == nullptr) {
+    return;
+  }
+  if (xQueueSend(characteristic_queue_, &event, 0) != pdTRUE) {
+    ESP_LOGW(kTag, "characteristic queue full, dropping event");
   }
 }
 
@@ -392,6 +451,9 @@ int BleManager::OnGapEvent(struct ble_gap_event* event, void* /*arg*/) {
       break;
     case BLE_GAP_EVENT_DISCONNECT:
       self->HandleDisconnect(*event);
+      break;
+    case BLE_GAP_EVENT_NOTIFY_RX:
+      self->HandleNotifyRx(*event);
       break;
     case BLE_GAP_EVENT_MTU:
       // Informational only: the MTU exchange this code cares about is the
@@ -530,6 +592,9 @@ void BleManager::HandleConnect(const struct ble_gap_event& event) {
   // discovery starts appending to it again.
   num_services_ = 0;
   next_svc_to_disc_ = 0;
+  pending_subscribe_val_handle_ = 0;
+  descriptor_search_started_ = false;
+  subscribe_started_ = false;
   SetState(BleState::kConnected);
   ESP_LOGI(kTag, "Connected; conn_handle=%d", conn_handle_);
 
@@ -687,6 +752,15 @@ int BleManager::OnChrDisc(uint16_t conn_handle,
 void BleManager::HandleChrDisc(const struct ble_gatt_error& error,
                                const struct ble_gatt_chr* chr) {
   if (error.status == BLE_HS_EDONE) {
+    // If the read characteristic was the last one in this service, no
+    // subsequent characteristic ever arrived to bound its descriptor
+    // search (see OnCharacteristicDiscovered()) -- the service's own end
+    // handle is the correct, final boundary in that case, exactly matching
+    // blecent's own chr_end_handle() for a characteristic with no
+    // successor.
+    if (pending_subscribe_val_handle_ != 0 && !descriptor_search_started_) {
+      StartDescriptorDiscovery(services_[next_svc_to_disc_].end_handle);
+    }
     // Done with this service; move on to the next one (or, if this was the
     // last one, DiscoverNextServiceChrs() transitions to kReadyForProtocol).
     ++next_svc_to_disc_;
@@ -709,6 +783,193 @@ void BleManager::HandleChrDisc(const struct ble_gatt_error& error,
            "  Characteristic: uuid=%s def_handle=%u val_handle=%u "
            "properties=[%s]",
            uuid_str, chr->def_handle, chr->val_handle, props);
+
+  OnCharacteristicDiscovered(*chr);
+}
+
+void BleManager::OnCharacteristicDiscovered(const struct ble_gatt_chr& chr) {
+  // If a previous characteristic in this same service was the read
+  // characteristic and is still waiting for its search boundary, this
+  // characteristic's own declaration handle is exactly that boundary --
+  // descriptors belong to the *previous* characteristic up to (but not
+  // including) the next one's declaration, matching blecent's own
+  // chr_end_handle(). This must run before the "is chr itself the read
+  // characteristic" check below, since a characteristic can't bound its
+  // own search.
+  if (pending_subscribe_val_handle_ != 0 && !descriptor_search_started_) {
+    StartDescriptorDiscovery(chr.def_handle - 1);
+  }
+
+  BleCharacteristicEvent found_event;
+  found_event.kind = BleCharacteristicEventKind::kFound;
+  found_event.uuid = chr.uuid;
+  found_event.val_handle = chr.val_handle;
+  EnqueueCharacteristic(found_event);
+
+  // Which characteristic to auto-subscribe to is the one piece of Grohe-
+  // specific knowledge in this class -- see the class-level comment on why
+  // that's an intentional, narrow exception, mirroring kGroheServiceUuid's
+  // own role in the scan filter.
+  if (subscribe_started_ || ble_uuid_cmp(&chr.uuid.u, &kGroheReadCharUuid.u) != 0) {
+    return;
+  }
+
+  subscribe_started_ = true;
+  pending_subscribe_val_handle_ = chr.val_handle;
+  descriptor_search_started_ = false;
+  // The search itself is deferred to StartDescriptorDiscovery(), called
+  // either above (once the next characteristic in this service is
+  // reported) or from HandleChrDisc()'s EDONE branch (if this was the last
+  // one) -- see pending_subscribe_val_handle_'s own comment for why the
+  // boundary isn't known yet at this point.
+}
+
+void BleManager::StartDescriptorDiscovery(uint16_t end_handle) {
+  descriptor_search_started_ = true;
+  // Search starts *at* val_handle, not val_handle + 1: confirmed against
+  // both ESP-IDF's own blecent example (apps/blecent/src/peer.c's
+  // peer_disc_dscs()) and, empirically, against this exact characteristic
+  // on real hardware -- a search starting at val_handle + 1 consistently
+  // (reproduced across multiple hardware trials) failed to find a CCCD
+  // that a direct Python/CoreBluetooth query confirms does exist at
+  // val_handle + 1. The characteristic's own value attribute is
+  // necessarily included and returned as the first result, matching its
+  // own UUID -- HandleDscDisc()'s CCCD comparison below simply doesn't
+  // match it and moves on, exactly as it does for every other non-CCCD
+  // descriptor.
+  const int rc =
+      ble_gattc_disc_all_dscs(conn_handle_, pending_subscribe_val_handle_,
+                              end_handle, &BleManager::OnDscDisc, this);
+  if (rc != 0) {
+    FailConnection("ble_gattc_disc_all_dscs", rc);
+  }
+}
+
+int BleManager::OnDscDisc(uint16_t conn_handle,
+                          const struct ble_gatt_error* error,
+                          uint16_t /*chr_val_handle*/,
+                          const struct ble_gatt_dsc* dsc, void* /*arg*/) {
+  // Resolved via instance_, not arg -- see the comment in OnGapEvent().
+  auto* self = instance_;
+  if (self == nullptr || error == nullptr) {
+    return 0;
+  }
+  if (conn_handle != self->conn_handle_) {
+    // Stale result for a connection this code has already moved on from --
+    // see the identical check in OnSvcDisc().
+    ESP_LOGD(kTag, "ignoring stale descriptor-discovery result for conn_handle=%d",
+             conn_handle);
+    return 0;
+  }
+  self->HandleDscDisc(*error, dsc);
+  return 0;
+}
+
+void BleManager::HandleDscDisc(const struct ble_gatt_error& error,
+                               const struct ble_gatt_dsc* dsc) {
+  if (error.status == BLE_HS_EDONE) {
+    if (pending_subscribe_val_handle_ != 0) {
+      // All of this characteristic's descriptors were enumerated and none
+      // was the CCCD -- it doesn't support what subscribing requires,
+      // despite advertising the NOTIFY property. A genuine, reportable
+      // mismatch between what discovery found and what this milestone
+      // needs, not a transport hiccup to retry.
+      FailConnection("missing CCCD for read characteristic", error.status);
+    }
+    return;
+  }
+  if (error.status != 0) {
+    FailConnection("descriptor discovery", error.status);
+    return;
+  }
+  if (dsc == nullptr || pending_subscribe_val_handle_ == 0) {
+    // pending_subscribe_val_handle_ == 0 means the CCCD was already found
+    // and the write already kicked off (see below) -- any further
+    // descriptor in this same enumeration is simply ignored.
+    return;
+  }
+
+  char dsc_uuid_str[BLE_UUID_STR_LEN];
+  ble_uuid_to_str(&dsc->uuid.u, dsc_uuid_str);
+  ESP_LOGI(kTag, "  Descriptor: uuid=%s handle=%u", dsc_uuid_str, dsc->handle);
+
+  if (ble_uuid_cmp(&dsc->uuid.u, &kCccdUuid.u) != 0) {
+    return;
+  }
+
+  const uint16_t chr_val_handle = pending_subscribe_val_handle_;
+  pending_subscribe_val_handle_ = 0;  // Found it; stop waiting for EDONE.
+  const int rc = ble_gattc_write_flat(
+      conn_handle_, dsc->handle, kEnableNotificationsValue,
+      sizeof(kEnableNotificationsValue), &BleManager::OnSubscribeWrite, this);
+  if (rc != 0) {
+    FailConnection("ble_gattc_write_flat (subscribe)", rc);
+    return;
+  }
+  ESP_LOGI(kTag,
+           "Subscribing to notifications: chr_val_handle=%u cccd_handle=%u",
+           chr_val_handle, dsc->handle);
+}
+
+int BleManager::OnSubscribeWrite(uint16_t conn_handle,
+                                 const struct ble_gatt_error* error,
+                                 struct ble_gatt_attr* /*attr*/,
+                                 void* /*arg*/) {
+  // Resolved via instance_, not arg -- see the comment in OnGapEvent().
+  auto* self = instance_;
+  if (self == nullptr || error == nullptr) {
+    return 0;
+  }
+  if (conn_handle != self->conn_handle_) {
+    // Stale result for a connection this code has already moved on from --
+    // see the identical check in OnSvcDisc().
+    ESP_LOGD(kTag, "ignoring stale subscribe-write result for conn_handle=%d",
+             conn_handle);
+    return 0;
+  }
+  self->HandleSubscribeWrite(*error);
+  return 0;
+}
+
+void BleManager::HandleSubscribeWrite(const struct ble_gatt_error& error) {
+  if (error.status != 0) {
+    FailConnection("subscribe write", error.status);
+    return;
+  }
+  ESP_LOGI(kTag, "Subscribed to notifications successfully");
+}
+
+void BleManager::HandleNotifyRx(const struct ble_gap_event& event) {
+  if (event.notify_rx.conn_handle != conn_handle_) {
+    // Stale result for a connection this code has already moved on from --
+    // see the identical check in OnSvcDisc().
+    ESP_LOGD(kTag, "ignoring stale notification for conn_handle=%d",
+             event.notify_rx.conn_handle);
+    return;
+  }
+
+  BleCharacteristicEvent notify_event;
+  notify_event.kind = BleCharacteristicEventKind::kNotification;
+  notify_event.notify_handle = event.notify_rx.attr_handle;
+
+  const uint16_t total_len = OS_MBUF_PKTLEN(event.notify_rx.om);
+  const size_t copy_len =
+      total_len < BleCharacteristicEvent::kMaxPayloadSize
+          ? total_len
+          : BleCharacteristicEvent::kMaxPayloadSize;
+  os_mbuf_copydata(event.notify_rx.om, 0, static_cast<int>(copy_len),
+                   notify_event.payload);
+  notify_event.payload_len = copy_len;
+  if (total_len > copy_len) {
+    // Never actually reachable at this build's 256-byte MTU (max payload
+    // 253 bytes, exactly kMaxPayloadSize), but if a future MTU renegotiation
+    // ever changed that, this would be the only sign of it -- surfaced
+    // rather than silently dropped.
+    ESP_LOGW(kTag, "notification payload truncated: %u bytes, kept %u",
+             total_len, static_cast<unsigned>(copy_len));
+  }
+
+  EnqueueCharacteristic(notify_event);
 }
 
 void BleManager::HandleDisconnect(const struct ble_gap_event& event) {
@@ -741,6 +1002,9 @@ void BleManager::FailConnection(const char* what, int reason) {
   conn_handle_ = BLE_HS_CONN_HANDLE_NONE;
   num_services_ = 0;
   next_svc_to_disc_ = 0;
+  pending_subscribe_val_handle_ = 0;
+  descriptor_search_started_ = false;
+  subscribe_started_ = false;
 
   // A connect-attempt failure -- whether it never left kDeviceFound (a
   // synchronous ble_hs_id_infer_auto()/ble_gap_connect() error inside
