@@ -191,24 +191,37 @@ peripheral, so a generic reusable BLE layer is premature abstraction.
   (`nimble_port_init()`/`nimble_port_freertos_init()`) and the connection
   state machine (`BleState`: `Idle`/`Initializing`/`Scanning`/`DeviceFound`/
   `Connecting`/`Connected`/`DiscoveringServices`/`ReadyForProtocol`/`Ready`/
-  `Disconnected`/`Backoff`). As of M5,
+  `Disconnected`/`Backoff`).
   `Idle -> Initializing -> Scanning -> DeviceFound -> Connecting ->
   Connected -> DiscoveringServices -> ReadyForProtocol` is reachable end to
   end: the host starts, syncs, scans until the Grohe service UUID is seen,
   connects, negotiates MTU, and walks the full GATT hierarchy (all primary
   services, then all characteristics per service, one service at a time).
-  `Ready` and `Backoff` remain unimplemented — no protocol communication or
-  reconnect logic yet.
-- **`ble_constants.hpp`** holds the BLE protocol constants — currently just
-  the Grohe service UUID, which appears exactly once in the codebase.
-  Future service and characteristic UUIDs belong here too, so the protocol
+  As of M6, it also reports every discovered characteristic (see
+  `PollCharacteristicEvents()` below) and automatically subscribes to
+  notifications on the Grohe read characteristic — see "GATT discovery"
+  below. `Ready` and `Backoff` remain unimplemented — no protocol read/write
+  handling or reconnect logic yet.
+- **`ble_constants.hpp`** holds the BLE protocol constants: the Grohe
+  service UUID (M4) and, as of M6, the read/write characteristic UUIDs.
+  Every one of these appears exactly once in the codebase, so the protocol
   surface stays reviewable in one place.
-- **`GroheClient`** is a thin facade over `BleManager` — the one class
-  `app/` is allowed to talk to for BLE, mirroring how `app/` never reaches
-  past `display`/`encoder`/`ui`'s own top-level classes either. It still
-  does nothing beyond forwarding `Init()`/`Poll()`; this is where GATT-level
-  Grohe protocol handling (reads/writes/notifications) will live once a
-  future milestone adds it.
+- **`GroheProtocol`** (M6) interprets the raw GATT data `BleManager` reports
+  as the Grohe application protocol: caching the read/write characteristic
+  handles by UUID, and logging every received payload — structured as
+  `{timestamp, responseCode}` where it parses as the confirmed format, raw
+  hex otherwise (a payload that doesn't parse is not an error; see "GATT
+  discovery" below). It owns no NimBLE types and makes no NimBLE calls —
+  everything arrives as plain data via `BleManager::PollCharacteristicEvents()`.
+- **`GroheClient`** is a thin facade over both `BleManager` and
+  `GroheProtocol` — the one class `app/` is allowed to talk to for BLE,
+  mirroring how `app/` never reaches past `display`/`encoder`/`ui`'s own
+  top-level classes either. `Poll()`'s public signature and behavior are
+  exactly what M3.1 established (drain the lifecycle queue, forward to the
+  caller's callback) — `app::App::Run()`'s call site has never changed.
+  Internally, `Poll()` also drains `BleManager`'s separate characteristic
+  queue and feeds `GroheProtocol` — this is the only class that knows both
+  exist.
 
 **GATT discovery** (M5): once connected, `ble_gattc_exchange_mtu()` is
 attempted (non-fatal if the peer declines — discovery still works at the
@@ -225,10 +238,49 @@ own "discovery failed → terminate" pattern, rather than leaving a
 half-discovered connection sitting on this project's single connection slot
 (`CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1`).
 
-**Two hardware-discovered robustness issues, both fixed** (found via
-repeated real-device trials, not by inspection alone — the appliance's
-signal is weak, around −95 to −101 dBm, close to the receiver's sensitivity
-limit, which is what exposes both of these):
+**Subscribing to notifications** (M6): which characteristic to
+auto-subscribe to is deliberately the one piece of Grohe-specific knowledge
+inside `BleManager` — an intentional, narrow exception to "no protocol
+knowledge in the transport layer", mirroring `kGroheServiceUuid`'s
+identical role in the scan filter (M4). The alternative — `GroheClient`
+calling back into `BleManager` from the app task once `GroheProtocol`
+recognizes the read characteristic — was the original plan, but was
+rejected during implementation: every member `BleManager` has ever touched
+(`state_`, `conn_handle_`, `services_`, ...) has been host-task-only since
+M3.1, with no synchronization around any of it, and a cross-task call would
+have been the first exception. Keeping the trigger inside `BleManager`
+means every NimBLE call this class makes still happens on the one task
+that has ever touched its state.
+
+Enabling notifications is: find the characteristic's Client Characteristic
+Configuration Descriptor (CCCD, UUID `0x2902`) via `ble_gattc_disc_all_dscs()`,
+then write `{0x01, 0x00}` to it via `ble_gattc_write_flat()` — the standard
+sequence, matching `blecent`'s own `blecent_read_write_subscribe()`. The
+search range needs the *next* characteristic's declaration handle as its
+upper bound (descriptors belong to the characteristic immediately
+preceding them, up to but not including the next declaration), but NimBLE
+reports characteristics one at a time in handle order, so that boundary
+isn't known when the read characteristic itself is reported. The search is
+therefore deferred (`pending_subscribe_val_handle_`/
+`descriptor_search_started_`) until either the next characteristic in the
+same service arrives, or — if the read characteristic was the last one —
+service discovery for that service completes, at which point the service's
+own end handle is the correct boundary.
+
+A GATT-level failure anywhere in this sequence (missing CCCD, a discovery
+or write error) disconnects cleanly via the same `FailConnection()` path
+as every other transport failure. A received payload that doesn't parse
+into the confirmed protocol format is a different kind of thing entirely —
+not a transport failure, and not disconnected on: `GroheProtocol` logs it
+as hex and the connection stays up, since this milestone deliberately does
+not yet interpret every possible payload shape.
+
+**Four hardware-discovered robustness issues in total across M5 and M6, all
+found and fixed via repeated real-device trials, not by inspection alone**
+(the appliance's signal is weak — around −95 to −101 dBm in M5's original
+test conditions — which is what exposed the first two; the last two were
+found later, at much better signal, purely from careful boundary reasoning
+not matching a working reference closely enough):
 1. ESP-IDF's bundled NimBLE fork autonomously reattempts a connection that
    fails immediately after being established (logged as `NimBLE: Reattempt
    connection; reason = 0x3e`, gated by `MYNEWT_VAL(BLE_ENABLE_CONN_REATTEMPT)`
@@ -253,6 +305,29 @@ limit, which is what exposes both of these):
    compares it against `conn_handle_` and silently ignores the callback if
    they don't match, exactly like `HandleDiscReport()`'s existing
    idempotency check for stale advertisement reports.
+3. The descriptor search range was initially computed as
+   `[val_handle + 1, service_end_handle]` — reasoning from first
+   principles about where a CCCD "should" be, rather than from a working
+   reference. This reproducibly failed to find a CCCD that a direct
+   Python/CoreBluetooth query confirmed does exist, because the range was
+   both wrong at the start (should start *at* `val_handle`, not after it)
+   and wrong at the end (sweeping into the *next* characteristic's own
+   declaration/value and misreporting them as descriptors, rather than
+   stopping just before it). Fixed by matching ESP-IDF's own bundled
+   `blecent` example (`apps/blecent/src/peer.c`'s `chr_end_handle()`)
+   exactly, which required deferring the search as described above.
+4. The CCCD's own UUID was initially declared as a 128-bit Bluetooth Base
+   UUID, on the reasoning that this device consistently uses that encoding
+   for its own custom attributes (confirmed for the Grohe characteristics
+   themselves). That reasoning didn't hold for the CCCD: this device
+   encodes it in the standard compact 16-bit form (confirmed directly via
+   this project's own descriptor-discovery log rendering it as `0x2902`,
+   the short form `ble_uuid_to_str()` only produces for a true 16-bit
+   type) — Bleak/CoreBluetooth's *separate* report of this same descriptor
+   as the expanded 128-bit string is that library's own display
+   normalization, not evidence about the actual over-the-air encoding.
+   `ble_uuid_cmp()` rejects on a type mismatch before ever comparing the
+   value, so the original 128-bit constant could never have matched.
 
 **Detection strategy**: the appliance is identified solely by the 128-bit
 service UUID it advertises (`kGroheServiceUuid`), matched against the

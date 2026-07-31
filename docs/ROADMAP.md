@@ -61,7 +61,7 @@ just logging.
       out of scope for this milestone.
 - [ ] Real product decision on whether this is the final screen layout, or
       just the first cut -- this milestone is deliberately a single static
-      screen, no menus/pages (see M6/M7 for BLE-driven content and visual
+      screen, no menus/pages (see M7/M8 for BLE-driven content and visual
       polish).
 
 ## M3 — BLE client foundation
@@ -172,7 +172,46 @@ hierarchy. No protocol communication (reads/writes/notifications) yet.
       corruption, or hang, exactly as this milestone's error-handling scope
       requires.
 
-## M6 — Grohe Blue control
+## M6 — Protocol Read Foundation ✅
+
+Reusing the Python reference implementation as source of truth, establish a
+reliable read path over the connection M5 already validated: cache the
+Grohe READ/WRITE characteristic handles, subscribe to notifications on the
+READ characteristic, and log every exchanged payload. No writes, no
+business logic, no state changes on the appliance.
+
+- [x] New `components/grohe_ble/{grohe_protocol.hpp,grohe_protocol.cpp}`:
+      protocol-only knowledge, zero NimBLE transport includes (see
+      [ARCHITECTURE.md](ARCHITECTURE.md#ble-grohe_ble)). Caches the
+      READ/WRITE characteristic handles by UUID, parses the confirmed
+      `timestamp:responseCode` response format ported directly from the
+      Python reference's `protocol.py`, and logs every packet (direction,
+      UUID, length, hex, and the structured form when it parses) — a
+      payload that doesn't parse is logged as hex, not treated as an
+      error.
+- [x] `BleManager` gains a second, purpose-specific queue
+      (`characteristic_queue_`/`BleCharacteristicEvent`), kept fully
+      separate from the M3.1 lifecycle queue; auto-subscribes to the READ
+      characteristic's notifications (CCCD discovery + write) the moment
+      it's discovered, with the subscribe-trigger decision deliberately
+      kept inside `BleManager` itself rather than called from the app task
+      (see ARCHITECTURE.md's "Subscribing to notifications" section for
+      the thread-safety rationale).
+- [x] Error handling split as specified: transport/GATT-level failures
+      (missing CCCD, discovery or write error) disconnect cleanly via the
+      existing `FailConnection()` path; an unparseable payload is not an
+      error and does not disconnect.
+- [x] Two more hardware-discovered robustness bugs found and fixed during
+      self-review (see ARCHITECTURE.md): an initial descriptor-search
+      range that missed the appliance's real CCCD, and an initial
+      CCCD UUID type mismatch caused by CoreBluetooth's 128-bit *display*
+      normalization not reflecting the actual 16-bit wire encoding.
+- [x] Verified on hardware across 6+ trials: characteristics cached,
+      CCCD found, subscribe write succeeds, connection stays up, clean
+      disconnect still works — zero crashes, zero queue-full events,
+      zero regressions from M5.
+
+## M7 — Grohe Blue control
 
 Depends on the BLE/GATT contract of the target appliance being defined.
 
@@ -183,7 +222,7 @@ Depends on the BLE/GATT contract of the target appliance being defined.
 - [ ] Error/timeout handling for a lost or rejected connection, plus
       reconnect/backoff.
 
-## M7 — Product polish
+## M8 — Product polish
 
 - [ ] Settings persistence (NVS) — last-used mode, pairing info, etc.
 - [ ] OTA updates.
