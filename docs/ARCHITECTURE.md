@@ -200,8 +200,9 @@ peripheral, so a generic reusable BLE layer is premature abstraction.
   As of M6, it also reports every discovered characteristic (see
   `PollCharacteristicEvents()` below) and automatically subscribes to
   notifications on the Grohe read characteristic — see "GATT discovery"
-  below. As of M7, it also accepts a single GATT write via
-  `WriteCharacteristic()` (see "Sending the stop() probe" below). `Ready`
+  below. As of M7, it also accepts a GATT write via `WriteCharacteristic()`
+  (see "Sending commands" below) — M8 reuses this same method unchanged
+  for a real dispense, exactly as it did for the M7 `stop()` probe. `Ready`
   and `Backoff` remain unimplemented — no further protocol handling or
   reconnect logic yet.
 - **`ble_constants.hpp`** holds the BLE protocol constants: the Grohe
@@ -220,7 +221,12 @@ peripheral, so a generic reusable BLE layer is premature abstraction.
   `BuildStopPayload()`, a pure function mirroring the Python reference's
   `stop_command()`/`serialize_payload()` — it needs HMAC/credentials, so it
   pulls in the two new sibling modules below, the same way `protocol.py`
-  imports `auth.py`.
+  imports `auth.py`. As of M8, `BuildStopPayload()` is a thin wrapper around
+  a general `BuildDispensePayload(credentials, amount_ml, taste, timestamp,
+  ...)` — the same payload-building path a real dispense command uses, not
+  a second, duplicated one — and `ApplianceState` gains a `sequence`
+  counter so `GroheClient` can tell which command a given acknowledgement
+  answers (see "Dispensing" below).
 - **`grohe_auth.hpp`/`.cpp`** (M7): HMAC-SHA256 and Base64 helpers (via
   mbedTLS), a direct port of the Python reference's `auth.py`, including its
   "free of any BLE or cloud logic" scoping — these are pure functions over
@@ -243,10 +249,16 @@ peripheral, so a generic reusable BLE layer is premature abstraction.
   callback) — `app::App::Run()`'s call site has never changed. Internally,
   `Poll()` also drains `BleManager`'s separate characteristic queue and
   feeds `GroheProtocol` — this is the only class that knows both exist. As
-  of M7, it also owns the one-time sequencing decision this milestone
-  needs (see "Sending the stop() probe" below), mirroring how the Python
-  reference's `client.py` orchestrates `ble.py`/`protocol.py` without
-  either of them knowing about sequencing themselves.
+  of M7, it also owned a one-time automatic sequencing decision (the
+  `stop()` probe), mirroring how the Python reference's `client.py`
+  orchestrates `ble.py`/`protocol.py` without either of them knowing about
+  sequencing themselves. M8 replaces that automatic probe with
+  caller-triggered commands — see "Dispensing" below — while keeping the
+  same orchestration role: `RequestDispense()`/`RequestStop()` decide
+  *whether* a command can be sent right now and disambiguate *which*
+  command a later acknowledgement answers; `app::DialController` decides
+  *why* (button presses), and never talks to `BleManager` or `GroheProtocol`
+  directly.
 
 **GATT discovery** (M5): once connected, `ble_gattc_exchange_mtu()` is
 attempted (non-fatal if the peer declines — discovery still works at the
@@ -300,25 +312,28 @@ not a transport failure, and not disconnected on: `GroheProtocol` logs it
 as hex and the connection stays up, since this milestone deliberately does
 not yet interpret every possible payload shape.
 
-**Sending the stop() probe** (M7): M6's own hardware validation, cross-
-checked against the Python reference's `client.py` (its `_connect()` never
-issues a GATT read — only `start_notifications()`), established that the
-Grohe read characteristic carries data *only* as an acknowledgement to a
-write. There is no passive appliance-state broadcast to read. So this
-milestone sends exactly one write per connection — the confirmed,
-idempotent `stop()` command (`amount=0`, `taste=0`) — purely to elicit
-that acknowledgement; it is protocol-activation infrastructure, not
-appliance control, and no dispense/water-selection command exists yet.
+**Sending commands** (M7 introduced the mechanism; M8 uses it for real):
+M6's own hardware validation, cross-checked against the Python reference's
+`client.py` (its `_connect()` never issues a GATT read — only
+`start_notifications()`), established that the Grohe read characteristic
+carries data *only* as an acknowledgement to a write. There is no passive
+appliance-state broadcast to read. M7 exploited this with exactly one
+write per connection — the confirmed, idempotent `stop()` command
+(`amount=0`, `taste=0`) — purely to elicit that acknowledgement as
+protocol-activation infrastructure. M8 replaces the *automatic* firing
+with genuine, caller-triggered commands (see "Dispensing" below), reusing
+the identical send path for both a real dispense and `stop()`.
 
-`GroheClient` gates the probe on two independent signals, both required:
-`BleEventType::kReadyForProtocol` (discovery finished, so `GroheProtocol`
-has cached the write handle) and the new `BleEventType::kSubscribed`
+`GroheClient` gates every command on two independent signals, both
+required: `BleEventType::kReadyForProtocol` (discovery finished, so
+`GroheProtocol` has cached the write handle) and `BleEventType::kSubscribed`
 (the CCCD write finished, so a response actually has somewhere to arrive).
 Hardware evidence showed these are not ordered — `ReadyForProtocol` can
 fire *before* the subscribe write completes — so gating on either alone
 would risk sending before notifications are enabled and losing the reply.
-Both flags, plus a `stop_probe_sent_` latch, reset on `kConnectionFailed`
-so a future reconnect gets a fresh probe per connection.
+Both flags, plus `pending_command_` (M8: at most one command outstanding
+at a time — see "Dispensing" below), reset on `kConnectionFailed` so a
+future reconnect starts clean.
 
 Sending the write itself does not add a synchronized `conn_handle_` or any
 other cross-task read to `BleManager` — every member it has ever had
@@ -360,6 +375,81 @@ READ/WRITE characteristics) has no other attribute to source any of these
 from. Per the Python reference's own stated principle ("Implement only
 behaviour that is confirmed by reverse engineering... mark assumptions
 clearly"), these remain unknown rather than guessed.
+
+**Dispensing** (M8): the first genuine appliance control. The dispense
+payload is structurally identical to `stop()`'s — `userId:timestamp:
+amountMl:taste:base64(hmac)`, `protocol.py`'s `create_request()` — just
+with real `amount_ml`/`taste` instead of `0`/`0`; `BuildDispensePayload()`
+is the one path both go through (`BuildStopPayload()` is now a thin
+wrapper calling it with `0`/`WaterType::kUnknown`), so there is no second,
+duplicated serialization to keep in sync.
+
+*Disambiguating acknowledgements*: the response format carries no marker
+of which command it answers, but `GroheClient` needs to know specifically
+whether a given `SUCCESS`/error belongs to a dispense request or a stop
+request. `ApplianceState::sequence` increments every time
+`GroheProtocol::HandleNotification` parses a new response;
+`RequestDispense()`/`RequestStop()` record it as a baseline the moment
+their write is queued, and `TakeCommandOutcome()` reports a result only
+once the sequence has advanced past that baseline — mirroring `client.py`'s
+own `_execute()`/`_wait_for_acknowledgement()` pattern (drain, send, wait
+for the *next* one) with a counter instead of a queue. Only one command
+may be outstanding at a time (`GroheClient::pending_command_`); a second
+request while one is in flight is rejected, not queued.
+
+*Idle/Dispensing state machine* (`app::DialController`, driven from
+`app::App::Run()` — see its own comment for why `DialController` never
+touches `GroheClient` directly): short press while idle sends a dispense
+request for the dialed amount; short press while dispensing sends `stop()`;
+a request already in flight (`command_pending_`, distinct from
+`dial_state::DispenseStatus` — a request can be pending before the
+appliance has even acknowledged it) debounces a rapid second press. The
+`Dispensing` state is entered only once the dispense command's `SUCCESS`
+acknowledgement actually arrives (`HandleCommandOutcome()`), never on the
+button press itself, and a non-success outcome leaves the status exactly
+as it was — no invented state. A successful `stop()` acknowledgement, or
+`BleEventType::kConnectionFailed` (`HandleConnectionLost()`, satisfying
+"disconnect during dispense"), returns to `Idle` immediately.
+
+*Physical dispense duration*: the appliance reports no dispense-completion
+event over BLE, so returning to `Idle` automatically relies on the Python
+reference's own empirically-measured timing model
+(`grohe_blue_ble/docs/PERFORMANCE.md`'s "Physical Dispense Duration"
+experiment, `examples/dispense_duration_test.py`,
+`results/dispense_duration.csv`) — reused verbatim, not re-derived:
+
+```
+dispense_time ≈ startup_overhead + amount_ml * time_per_ml
+```
+
+with **startup_overhead ≈ 1.32 s** and **time_per_ml ≈ 0.0403 s/ml**,
+measured across 100–1000 ml (the source document itself notes it is not
+validated outside that range). Ported as `GroheProtocol::PredictDispenseDurationMs()`,
+a pure function of `amount_ml`. The actual stopwatch is a small,
+dedicated `app::DispenseSession` (`Start()`/`Stop()`/`Finished()`/
+`Remaining()`) rather than raw timer fields on `DialController` — isolating
+the model and its bookkeeping so a future progress indicator or
+recalibration only touches this one class. `DialController::Tick()`,
+called every `App::Run()` iteration, checks `Finished()` against
+`esp_timer_get_time()` and returns to `Idle` once it fires.
+
+**No real-time clock — a genuine production gap, found during M8 hardware
+validation, not a code defect**: `GroheClient::SendCommand()` uses
+`time(nullptr)` for the payload's timestamp field, but this firmware has no
+RTC, SNTP, or any other real time source, so that call returns seconds
+since boot, not a real Unix epoch. On real hardware this made the
+appliance reject every command with `TIMESTAMP_EXPIRED` (code 2) — which
+is itself useful evidence: getting `TIMESTAMP_EXPIRED` rather than
+`INVALID_HMAC` confirms the credentials/HMAC pipeline is correct, and only
+the timestamp is wrong. Substituting a real epoch (hardcoded, temporarily,
+for validation only — never committed) immediately produced genuine
+`SUCCESS` responses and real physical dispenses, confirming the entire
+authenticated-write pipeline end to end. **Before this firmware can send
+authenticated commands in real use, it needs an actual time source** —
+SNTP (would need Wi-Fi, which this project deliberately doesn't have) or a
+timestamp supplied by whatever eventually pairs with it (e.g. a
+Home Assistant integration). This is out of scope for M8 and is not yet
+tracked as its own milestone.
 
 **Five hardware-discovered robustness issues in total across M5 through M7, all
 found and fixed via repeated real-device trials, not by inspection alone**

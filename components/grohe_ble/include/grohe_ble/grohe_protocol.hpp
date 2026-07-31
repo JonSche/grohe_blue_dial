@@ -33,6 +33,18 @@
 // reference. GroheProtocol still makes no NimBLE calls and has no opinion on
 // *when* to send anything -- that sequencing lives in GroheClient, which
 // owns both this class and BleManager (see grohe_client.hpp).
+//
+// M8 scope: BuildStopPayload() is now a thin wrapper around a general
+// BuildDispensePayload(), the same payload-building path a real dispense
+// command uses (amount_ml/taste instead of 0/0) -- mirroring protocol.py's
+// own create_request(), which both dispense() and stop() go through in the
+// Python reference. ApplianceState gains a monotonic `sequence` so
+// GroheClient can tell *which* command a given acknowledgement answers
+// (see grohe_client.hpp's CommandOutcome) without either side needing to
+// re-derive that from the response's own fields, which carry no such
+// marker. PredictDispenseDurationMs() ports the Python reference's own
+// empirically-measured physical-dispense-duration model -- see its own
+// comment for the source and validated range.
 namespace grohe_ble {
 
 // The appliance's one confirmed protocol response, decoded from a
@@ -47,25 +59,67 @@ struct ApplianceState {
   long timestamp = 0;
   long response_code = 0;
   bool is_success = false;
+  // Increments every time HandleNotification successfully parses a new
+  // response (M8). The response format itself carries no marker of which
+  // command it answers, so consumers that need to (GroheClient, to tell a
+  // dispense ack from a stop ack) compare this against a baseline recorded
+  // at send time, rather than each independently diffing every field.
+  uint32_t sequence = 0;
 };
 
-// The largest payload BuildStopPayload() (or any future write this protocol
-// module builds) may produce -- tied to BleCharacteristicEvent's own MTU-
-// derived bound so a single GATT write can never exceed what this
-// connection's negotiated MTU actually allows, not an independently chosen
-// number that could silently drift out of sync with it.
+// Mirrors the Python reference's WaterType IntEnum (constants.py) exactly --
+// the numeric "taste" field in the BLE payload.
+enum class WaterType {
+  kUnknown = 0,
+  kStill = 1,
+  kMedium = 2,
+  kSparkling = 3,
+  kHot = 4,
+  kHotMixed = 5,
+};
+
+// The largest payload BuildDispensePayload() (or BuildStopPayload()) may
+// produce -- tied to BleCharacteristicEvent's own MTU-derived bound so a
+// single GATT write can never exceed what this connection's negotiated MTU
+// actually allows, not an independently chosen number that could silently
+// drift out of sync with it.
 inline constexpr size_t kMaxStopPayloadSize =
     BleCharacteristicEvent::kMaxPayloadSize;
 
-// Builds the confirmed stop-command payload -- protocol.py's stop_command()
-// (amount=0, taste=0) plus serialize_payload(): HMAC-SHA256-signed
-// "userId:timestamp:0:0:base64(hmac)". Returns false (leaving `out`
-// untouched) if any stage fails: the message or final payload doesn't fit
-// in the given buffers, or credential decoding/HMAC computation fails (see
-// grohe_auth.hpp) -- never partially writes `out` in that case.
+// Builds a signed dispense-command payload -- protocol.py's create_request()
+// (in turn DispenseCommand.hmac_message + serialize_payload()):
+// HMAC-SHA256-signed "userId:timestamp:amountMl:taste:base64(hmac)". Returns
+// false (leaving `out` untouched) if any stage fails: the message or final
+// payload doesn't fit in the given buffers, or credential decoding/HMAC
+// computation fails (see grohe_auth.hpp) -- never partially writes `out` in
+// that case. This is the one payload-building path for both a real dispense
+// and stop() (see BuildStopPayload() below) -- there is no separate,
+// duplicated serialization for either.
+[[nodiscard]] bool BuildDispensePayload(const Credentials& credentials,
+                                        int amount_ml, WaterType taste,
+                                        uint32_t timestamp, char* out,
+                                        size_t out_size);
+
+// The confirmed stop command -- protocol.py's stop_command(): amount=0,
+// taste=0, otherwise identical to BuildDispensePayload().
 [[nodiscard]] bool BuildStopPayload(const Credentials& credentials,
                                     uint32_t timestamp, char* out,
                                     size_t out_size);
+
+// Predicts physical dispense duration (from the SUCCESS acknowledgement to
+// the appliance fully stopping), in milliseconds, for a given amount.
+// Ported directly from the Python reference's own empirically-measured
+// model (grohe_blue_ble/docs/PERFORMANCE.md's "Physical Dispense Duration"
+// experiment, examples/dispense_duration_test.py,
+// results/dispense_duration.csv) -- not re-derived or approximated here:
+//
+//     dispense_time ≈ startup_overhead + amount_ml * time_per_ml
+//
+// with startup_overhead ≈ 1.32 s and time_per_ml ≈ 0.0403 s/ml, measured
+// across 100-1000 ml. The source document itself notes this is not
+// validated outside that range (very small amounts, where startup effects
+// may dominate differently, or amounts above 1000 ml, untested).
+[[nodiscard]] uint32_t PredictDispenseDurationMs(int amount_ml);
 
 class GroheProtocol {
  public:
@@ -82,8 +136,8 @@ class GroheProtocol {
   [[nodiscard]] const ApplianceState& State() const { return state_; }
 
   // 0 until the write characteristic has been discovered (see HandleFound());
-  // GroheClient uses this to know when it's safe to build and send the stop
-  // probe.
+  // GroheClient uses this to know when it's safe to build and send a
+  // command.
   [[nodiscard]] uint16_t write_char_handle() const {
     return write_char_handle_;
   }

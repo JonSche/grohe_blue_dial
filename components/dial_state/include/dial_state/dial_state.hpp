@@ -7,6 +7,15 @@ enum class WaterType {
   kSparkling,
 };
 
+// Whether the dial is currently waiting out a dispense (M8). Purely a
+// rendering concern -- the actual timing model and state transitions live
+// in app::DialController/app::DispenseSession, not here (see
+// dial_state's own CMakeLists.txt comment: no grohe_ble dependency).
+enum class DispenseStatus {
+  kIdle,
+  kDispensing,
+};
+
 // Single source of truth for the dial's UI. app::DialController owns and
 // mutates the one instance of this; ui::UiManager only ever reads it via
 // Render(). No component may modify LVGL objects and this struct
@@ -14,12 +23,13 @@ enum class WaterType {
 struct DialState {
   int amount_ml = 500;
   WaterType water_type = WaterType::kSparkling;
+  DispenseStatus dispense_status = DispenseStatus::kIdle;
 
-  // M7: the appliance's one confirmed protocol response (see
+  // The appliance's latest confirmed protocol response (see
   // grohe_ble::ApplianceState, translated by app::DialController --
   // dial_state has no dependency on grohe_ble, matching its own
   // CMakeLists.txt comment). False until any response has been decoded,
-  // i.e. still connecting/subscribing, or before the stop() probe's
+  // i.e. still connecting/subscribing, or before the first command's
   // acknowledgement arrives.
   bool appliance_response_received = false;
   bool appliance_response_success = false;

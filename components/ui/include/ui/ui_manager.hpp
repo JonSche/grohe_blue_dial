@@ -30,6 +30,11 @@ class UiManager {
   lv_obj_t* arc_ = nullptr;
   lv_obj_t* amount_label_ = nullptr;
   lv_obj_t* water_type_label_ = nullptr;
+  // M2's static hint, now updated by Render() (M8) to reflect
+  // dispense_status: "PRESS TO POUR" while idle, "PRESS TO STOP" while
+  // dispensing -- reusing the existing label rather than adding a new one,
+  // per "no UI redesign".
+  lv_obj_t* hint_label_ = nullptr;
   // M7: the one UI addition for the appliance's decoded protocol state --
   // see Render()'s own implementation for exactly what it shows.
   lv_obj_t* appliance_status_label_ = nullptr;

@@ -128,26 +128,34 @@ void LogPacket(const char* direction, const ble_uuid_t& uuid,
              static_cast<unsigned>(len), hex);
   }
 }
-// Generous, checked bounds for the stop payload's components -- no exact
+// Generous, checked bounds for the payload's components -- no exact
 // maximum length is confirmed by evidence for user_id or the pre-shared
 // key (neither the Python reference nor docs/EVIDENCE.md constrains
-// either), so every stage in BuildStopPayload() below is checked via
+// either), so every stage in BuildDispensePayload() below is checked via
 // snprintf()'s/DecodePreSharedKey()'s own return value, never assumed to
 // fit.
 constexpr size_t kMaxHmacMessageSize = 160;
 constexpr size_t kMaxPreSharedKeySize = 64;
 constexpr size_t kMaxHmacBase64Size = 64;
 
+// M8's ported physical-dispense-duration model (see PredictDispenseDurationMs()'s
+// own doc comment in grohe_protocol.hpp for the source and validated range).
+// Kept as plain doubles, matching how the source document states them --
+// not re-fit or rounded differently.
+constexpr double kStartupOverheadSec = 1.32;
+constexpr double kTimePerMlSec = 0.0403;
+
 }  // namespace
 
-bool BuildStopPayload(const Credentials& credentials, uint32_t timestamp,
-                     char* out, size_t out_size) {
-  // protocol.py's DispenseCommand.hmac_message: "userId:timestamp:amount:taste",
-  // amount=0 and taste=0 for the confirmed stop command (stop_command()).
+bool BuildDispensePayload(const Credentials& credentials, int amount_ml,
+                         WaterType taste, uint32_t timestamp, char* out,
+                         size_t out_size) {
+  // protocol.py's DispenseCommand.hmac_message: "userId:timestamp:amount:taste".
   char message[kMaxHmacMessageSize];
-  const int message_len =
-      std::snprintf(message, sizeof(message), "%s:%u:0:0",
-                   credentials.user_id, static_cast<unsigned>(timestamp));
+  const int message_len = std::snprintf(
+      message, sizeof(message), "%s:%u:%d:%d", credentials.user_id,
+      static_cast<unsigned>(timestamp), amount_ml,
+      static_cast<int>(taste));
   if (message_len < 0 ||
       static_cast<size_t>(message_len) >= sizeof(message)) {
     return false;
@@ -171,6 +179,19 @@ bool BuildStopPayload(const Credentials& credentials, uint32_t timestamp,
   const int written =
       std::snprintf(out, out_size, "%s:%s", message, hmac_base64);
   return written >= 0 && static_cast<size_t>(written) < out_size;
+}
+
+bool BuildStopPayload(const Credentials& credentials, uint32_t timestamp,
+                     char* out, size_t out_size) {
+  // protocol.py's stop_command(): amount=0, taste=0.
+  return BuildDispensePayload(credentials, 0, WaterType::kUnknown, timestamp,
+                             out, out_size);
+}
+
+uint32_t PredictDispenseDurationMs(int amount_ml) {
+  const double seconds =
+      kStartupOverheadSec + static_cast<double>(amount_ml) * kTimePerMlSec;
+  return static_cast<uint32_t>(seconds * 1000.0);
 }
 
 void GroheProtocol::HandleCharacteristicEvent(
@@ -223,6 +244,7 @@ void GroheProtocol::HandleNotification(uint16_t handle,
     state_.timestamp = parsed.timestamp;
     state_.response_code = parsed.code;
     state_.is_success = parsed.code == 0;  // ResponseCode::SUCCESS
+    ++state_.sequence;
   }
 }
 

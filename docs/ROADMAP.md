@@ -61,7 +61,7 @@ just logging.
       out of scope for this milestone.
 - [ ] Real product decision on whether this is the final screen layout, or
       just the first cut -- this milestone is deliberately a single static
-      screen, no menus/pages (see M8/M9 for BLE-driven content and visual
+      screen, no menus/pages (see M9/M10 for BLE-driven content and visual
       polish).
 
 ## M3 — BLE client foundation
@@ -257,16 +257,75 @@ control are in scope.
       stably, the probe fires exactly once per connection every time, and
       clean disconnect still works -- zero crashes, zero regressions.
 
-## M8 — Grohe Blue control
+## M8 — First Successful Dispense ✅
 
-Depends on the BLE/GATT contract of the target appliance being defined.
+M7 built the complete authenticated write pipeline but only ever exercised
+it with an automatically-fired `stop()` probe. This milestone performs the
+first genuine appliance control: replaces that probe with a real,
+user-triggered dispense command, reusing the existing UI (encoder selects
+amount, short press starts/stops) rather than adding menus or screens.
+`stop()` remains available, now reachable as "press again while
+dispensing" for testing and emergency cancellation.
 
-- [ ] Dispense commands and water selection from the dial (encoder +
-      button) back to the appliance.
+- [x] `BuildDispensePayload()` (real `amount_ml`/`taste`) added to
+      `GroheProtocol`, with `BuildStopPayload()` becoming a thin wrapper
+      around it — one payload-building path for both, not two. `WaterType`
+      ported from the Python reference's `constants.py`.
+- [x] `ApplianceState` gains a `sequence` counter so `GroheClient` can tell
+      which command (dispense vs. stop) a given acknowledgement answers —
+      the response format itself carries no such marker.
+- [x] `GroheClient` replaces M7's automatic probe with
+      `RequestDispense()`/`RequestStop()` (at most one command outstanding
+      at a time) and edge-triggered `TakeCommandOutcome()`.
+- [x] `DialController` owns the Idle/Dispensing state machine: short press
+      dispenses when idle, stops when dispensing; `Dispensing` is entered
+      only on the dispense command's actual `SUCCESS` acknowledgement, never
+      on the button press itself; a rejected/errored command leaves status
+      unchanged (no invented state); `kConnectionFailed` forces a return to
+      `Idle` ("disconnect during dispense").
+- [x] Physical dispense duration (the appliance reports no BLE completion
+      event) is predicted from the Python reference's own empirically-
+      measured model (`docs/PERFORMANCE.md`'s "Physical Dispense Duration"
+      experiment) — reused verbatim via `PredictDispenseDurationMs()` and a
+      small, isolated `app::DispenseSession` stopwatch — not re-derived or
+      approximated.
+- [x] `UiManager` reuses the existing M2 hint label ("PRESS TO POUR" /
+      "PRESS TO STOP"); no new screens or widgets.
+- [x] Documented the dispense payload format, the ACK-disambiguation
+      mechanism, the ported timing model and its validated range, and the
+      state machine in [ARCHITECTURE.md](ARCHITECTURE.md#ble-grohe_ble).
+- [x] Verified on hardware with real credentials: authenticated dispense
+      writes succeed, the appliance physically dispenses (confirmed
+      visually across several amounts), `stop()` mid-dispense returns to
+      idle immediately and the appliance stops, and the UI transitions
+      (hint label, auto-return-to-idle on the predicted timer) matched
+      what was actually observed on the physical dial. "Disconnect during
+      dispense" (`HandleConnectionLost()`) was verified by code review
+      against the same `kConnectionFailed` mechanism already hardware-
+      validated in M5–M7, not by a fresh live disconnect-mid-dispense
+      test (impractical to induce non-destructively on this hardware).
+- [x] Found during validation, not a code defect: this firmware has no
+      real-time clock, so every command's timestamp was rejected as
+      `TIMESTAMP_EXPIRED` until a real epoch was substituted (temporarily,
+      for validation only, never committed) — which then produced genuine
+      `SUCCESS` responses and real dispenses, confirming the
+      credentials/HMAC pipeline is correct end to end. See
+      [ARCHITECTURE.md](ARCHITECTURE.md#ble-grohe_ble)'s "No real-time
+      clock" section — production use needs a real time source before
+      this milestone's own commands will succeed outside a lab setting.
+
+## M9 — Grohe Blue control
+
+- [ ] A real time source (SNTP or a value supplied by whatever eventually
+      pairs with this firmware, e.g. Home Assistant) — required before
+      authenticated commands succeed outside a temporary hardcoded
+      timestamp; found as a gap during M8 hardware validation.
+- [ ] Broader water-type selection (beyond the existing still/sparkling
+      toggle), if the product direction calls for it.
 - [ ] Error/timeout handling for a lost or rejected connection, plus
       reconnect/backoff.
 
-## M9 — Product polish
+## M10 — Product polish
 
 - [ ] Settings persistence (NVS) — last-used mode, pairing info, etc.
 - [ ] OTA updates.

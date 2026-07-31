@@ -74,13 +74,13 @@ void UiManager::Init(lv_display_t* display) {
   ApplyLetterSpacedCaps(water_type_label_);
   lv_obj_align(water_type_label_, LV_ALIGN_CENTER, 0, 34);
 
-  lv_obj_t* hint_label = lv_label_create(screen);
-  lv_label_set_text(hint_label, "PRESS TO POUR");
-  lv_obj_set_style_text_color(hint_label, kMutedTextColor, 0);
-  lv_obj_set_style_text_opa(hint_label, LV_OPA_60, 0);
-  lv_obj_set_style_text_font(hint_label, &lv_font_montserrat_14, 0);
-  ApplyLetterSpacedCaps(hint_label);
-  lv_obj_align(hint_label, LV_ALIGN_CENTER, 0, 66);
+  hint_label_ = lv_label_create(screen);
+  lv_label_set_text(hint_label_, "PRESS TO POUR");
+  lv_obj_set_style_text_color(hint_label_, kMutedTextColor, 0);
+  lv_obj_set_style_text_opa(hint_label_, LV_OPA_60, 0);
+  lv_obj_set_style_text_font(hint_label_, &lv_font_montserrat_14, 0);
+  ApplyLetterSpacedCaps(hint_label_);
+  lv_obj_align(hint_label_, LV_ALIGN_CENTER, 0, 66);
 
   // M7: the appliance's decoded protocol state -- a compact technical
   // readout, deliberately not letter-spaced like the labels above (this
@@ -99,6 +99,11 @@ void UiManager::Render(const dial_state::DialState& state) {
   lv_label_set_text_fmt(amount_label_, "%d", state.amount_ml);
   lv_label_set_text(water_type_label_,
                      dial_state::WaterTypeLabel(state.water_type));
+
+  lv_label_set_text(hint_label_,
+                     state.dispense_status == dial_state::DispenseStatus::kIdle
+                         ? "PRESS TO POUR"
+                         : "PRESS TO STOP");
 
   if (!state.appliance_response_received) {
     lv_label_set_text(appliance_status_label_, "APPL --");

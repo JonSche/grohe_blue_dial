@@ -44,21 +44,47 @@ void App::Run() {
   for (;;) {
     bool state_changed = false;
     encoder_input_.Poll([this, &state_changed](encoder::EncoderEvent event) {
-      dial_controller_.HandleEvent(event);
+      const app::DialAction action = dial_controller_.HandleEvent(event);
       state_changed = true;
+      switch (action) {
+        case app::DialAction::kRequestDispense: {
+          const auto& state = dial_controller_.State();
+          const bool accepted = grohe_client_.RequestDispense(
+              state.amount_ml, app::ToGroheWaterType(state.water_type));
+          dial_controller_.HandleCommandSent(accepted);
+          break;
+        }
+        case app::DialAction::kRequestStop: {
+          const bool accepted = grohe_client_.RequestStop();
+          dial_controller_.HandleCommandSent(accepted);
+          break;
+        }
+        case app::DialAction::kNone:
+          break;
+      }
     });
 
-    // Lifecycle events are still just logged here (unchanged since M3.1);
-    // the appliance's decoded protocol state (M7) is read separately below
-    // via LatestApplianceState(), the same way encoder events above are
-    // handed to dial_controller_ -- Poll()'s signature and this call site
-    // don't otherwise change.
-    grohe_client_.Poll([](const grohe_ble::BleEvent& event) {
+    // Lifecycle events are still just logged here (unchanged since M3.1),
+    // except for kConnectionFailed, which also forces DialController back
+    // to Idle (M8's "disconnect during dispense" requirement).
+    grohe_client_.Poll([this, &state_changed](const grohe_ble::BleEvent& event) {
       ESP_LOGI(kTag, "BLE event: %s (reason=%d)",
                grohe_ble::ToString(event.type), event.reason);
+      if (event.type == grohe_ble::BleEventType::kConnectionFailed) {
+        if (dial_controller_.HandleConnectionLost()) {
+          state_changed = true;
+        }
+      }
     });
     if (dial_controller_.HandleApplianceState(
             grohe_client_.LatestApplianceState())) {
+      state_changed = true;
+    }
+    if (dial_controller_.HandleCommandOutcome(
+            grohe_client_.TakeCommandOutcome())) {
+      state_changed = true;
+    }
+    if (dial_controller_.Tick()) {
       state_changed = true;
     }
 
