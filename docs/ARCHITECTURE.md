@@ -200,8 +200,10 @@ peripheral, so a generic reusable BLE layer is premature abstraction.
   As of M6, it also reports every discovered characteristic (see
   `PollCharacteristicEvents()` below) and automatically subscribes to
   notifications on the Grohe read characteristic — see "GATT discovery"
-  below. `Ready` and `Backoff` remain unimplemented — no protocol read/write
-  handling or reconnect logic yet.
+  below. As of M7, it also accepts a single GATT write via
+  `WriteCharacteristic()` (see "Sending the stop() probe" below). `Ready`
+  and `Backoff` remain unimplemented — no further protocol handling or
+  reconnect logic yet.
 - **`ble_constants.hpp`** holds the BLE protocol constants: the Grohe
   service UUID (M4) and, as of M6, the read/write characteristic UUIDs.
   Every one of these appears exactly once in the codebase, so the protocol
@@ -213,15 +215,38 @@ peripheral, so a generic reusable BLE layer is premature abstraction.
   hex otherwise (a payload that doesn't parse is not an error; see "GATT
   discovery" below). It owns no NimBLE types and makes no NimBLE calls —
   everything arrives as plain data via `BleManager::PollCharacteristicEvents()`.
-- **`GroheClient`** is a thin facade over both `BleManager` and
-  `GroheProtocol` — the one class `app/` is allowed to talk to for BLE,
-  mirroring how `app/` never reaches past `display`/`encoder`/`ui`'s own
-  top-level classes either. `Poll()`'s public signature and behavior are
-  exactly what M3.1 established (drain the lifecycle queue, forward to the
-  caller's callback) — `app::App::Run()`'s call site has never changed.
-  Internally, `Poll()` also drains `BleManager`'s separate characteristic
-  queue and feeds `GroheProtocol` — this is the only class that knows both
-  exist.
+  As of M7, a successfully parsed response is also exposed structurally as
+  `ApplianceState` (see "Appliance state" below), and the module gains
+  `BuildStopPayload()`, a pure function mirroring the Python reference's
+  `stop_command()`/`serialize_payload()` — it needs HMAC/credentials, so it
+  pulls in the two new sibling modules below, the same way `protocol.py`
+  imports `auth.py`.
+- **`grohe_auth.hpp`/`.cpp`** (M7): HMAC-SHA256 and Base64 helpers (via
+  mbedTLS), a direct port of the Python reference's `auth.py`, including its
+  "free of any BLE or cloud logic" scoping — these are pure functions over
+  plain bytes, with no knowledge of BLE, credentials storage, or the Grohe
+  payload format itself.
+- **`grohe_credentials.hpp`/`.cpp`** (M7): a small `CredentialsProvider`
+  interface (`Get() -> const Credentials&`) so `BuildStopPayload()` never
+  depends on *where* the user ID / pre-shared key come from. The only
+  implementation today, `LocalCredentialsProvider`, reads them from a
+  gitignored local header (`credentials_local.hpp`; see
+  `credentials_local.hpp.example` and `.gitignore`) — mirroring the Python
+  reference's own gitignored `.env`. No secret is ever committed. A future
+  milestone can add a cloud- or NVS-backed provider without touching
+  `GroheProtocol` or `GroheClient`.
+- **`GroheClient`** is a thin facade over `BleManager` and `GroheProtocol`
+  — the one class `app/` is allowed to talk to for BLE, mirroring how
+  `app/` never reaches past `display`/`encoder`/`ui`'s own top-level
+  classes either. `Poll()`'s public signature and behavior are exactly what
+  M3.1 established (drain the lifecycle queue, forward to the caller's
+  callback) — `app::App::Run()`'s call site has never changed. Internally,
+  `Poll()` also drains `BleManager`'s separate characteristic queue and
+  feeds `GroheProtocol` — this is the only class that knows both exist. As
+  of M7, it also owns the one-time sequencing decision this milestone
+  needs (see "Sending the stop() probe" below), mirroring how the Python
+  reference's `client.py` orchestrates `ble.py`/`protocol.py` without
+  either of them knowing about sequencing themselves.
 
 **GATT discovery** (M5): once connected, `ble_gattc_exchange_mtu()` is
 attempted (non-fatal if the peer declines — discovery still works at the
@@ -275,12 +300,74 @@ not a transport failure, and not disconnected on: `GroheProtocol` logs it
 as hex and the connection stays up, since this milestone deliberately does
 not yet interpret every possible payload shape.
 
-**Four hardware-discovered robustness issues in total across M5 and M6, all
+**Sending the stop() probe** (M7): M6's own hardware validation, cross-
+checked against the Python reference's `client.py` (its `_connect()` never
+issues a GATT read — only `start_notifications()`), established that the
+Grohe read characteristic carries data *only* as an acknowledgement to a
+write. There is no passive appliance-state broadcast to read. So this
+milestone sends exactly one write per connection — the confirmed,
+idempotent `stop()` command (`amount=0`, `taste=0`) — purely to elicit
+that acknowledgement; it is protocol-activation infrastructure, not
+appliance control, and no dispense/water-selection command exists yet.
+
+`GroheClient` gates the probe on two independent signals, both required:
+`BleEventType::kReadyForProtocol` (discovery finished, so `GroheProtocol`
+has cached the write handle) and the new `BleEventType::kSubscribed`
+(the CCCD write finished, so a response actually has somewhere to arrive).
+Hardware evidence showed these are not ordered — `ReadyForProtocol` can
+fire *before* the subscribe write completes — so gating on either alone
+would risk sending before notifications are enabled and losing the reply.
+Both flags, plus a `stop_probe_sent_` latch, reset on `kConnectionFailed`
+so a future reconnect gets a fresh probe per connection.
+
+Sending the write itself does not add a synchronized `conn_handle_` or any
+other cross-task read to `BleManager` — every member it has ever had
+remains touched exclusively by the NimBLE host task, with the one
+exception being that `WriteCharacteristic()` is *callable* from the app
+task. It only ever enqueues a `BleWriteCommand` onto a new `command_queue_`
+and posts a `ble_npl_event` to NimBLE's own default event queue
+(`nimble_port_get_dflt_eventq()`, already serviced forever by
+`HostTask()`'s `nimble_port_run()`) — the same primitive NimBLE itself uses
+to marshal work onto that task. The actual `ble_gattc_write_flat()` call,
+and its read of `conn_handle_`, happens once that event fires, on the host
+task, exactly like every other GATT call this class makes.
+
+**Appliance state** (M7): the one confirmed, decoded field set, `ApplianceState
+{received, timestamp, response_code, is_success}`, flows
+`GroheProtocol` → `app::DialController::HandleApplianceState()` →
+`dial_state::DialState` → `ui::UiManager` — `dial_state` has no dependency
+on `grohe_ble` (see its own `CMakeLists.txt`), so `DialController` is the
+one place that translates between the two, the same role it already plays
+for `encoder::EncoderEvent`. Every decoded field, with its evidence trail:
+
+| Field | Source | Confidence | Evidence |
+|---|---|---|---|
+| `timestamp` | Response payload's first `:`-separated field | Confirmed field exists; value uninterpreted | `protocol.py`'s own comment: "timestamp precision (seconds vs milliseconds) is *not* confirmed" — treated as an opaque integer, never interpreted, exactly as the reference does |
+| `response_code` | Response payload's second `:`-separated field | ⭐⭐⭐⭐⭐ Confirmed | `docs/EVIDENCE.md`'s "Response Codes" table; ported byte-for-byte from `constants.py`'s `ResponseCode` enum in M6 |
+| `is_success` | Derived: `response_code == SUCCESS (0)` | ⭐⭐⭐⭐⭐ Confirmed | `protocol.py`'s `ApplianceResponse.is_success` property |
+
+What is **not** available, and why: appliance mode, idle/dispensing state,
+filter status, CO₂ status, remaining lifetime, error/warning conditions,
+capability flags, and firmware information are all either cloud-only
+(`GET /v3/iot/dashboard`'s `appliance.status` field — not exposed over
+BLE at all) or explicitly unconfirmed (`docs/TODO.md`'s "Future Ideas":
+"Reverse engineer filter reset", "...CO₂ reset", "...diagnostics",
+"...firmware update"). This isn't an implementation gap in this
+milestone — it reflects the actual, current state of BLE reverse
+engineering: the complete GATT hierarchy confirmed on hardware since M5
+(`0x1800` Generic Access, `0x1801` Generic Attribute, the Grohe service's
+READ/WRITE characteristics) has no other attribute to source any of these
+from. Per the Python reference's own stated principle ("Implement only
+behaviour that is confirmed by reverse engineering... mark assumptions
+clearly"), these remain unknown rather than guessed.
+
+**Five hardware-discovered robustness issues in total across M5 through M7, all
 found and fixed via repeated real-device trials, not by inspection alone**
 (the appliance's signal is weak — around −95 to −101 dBm in M5's original
-test conditions — which is what exposed the first two; the last two were
+test conditions — which is what exposed the first two; the next two were
 found later, at much better signal, purely from careful boundary reasoning
-not matching a working reference closely enough):
+not matching a working reference closely enough; the fifth is an
+initialization-order bug unrelated to RF conditions):
 1. ESP-IDF's bundled NimBLE fork autonomously reattempts a connection that
    fails immediately after being established (logged as `NimBLE: Reattempt
    connection; reason = 0x3e`, gated by `MYNEWT_VAL(BLE_ENABLE_CONN_REATTEMPT)`
@@ -328,6 +415,17 @@ not matching a working reference closely enough):
    normalization, not evidence about the actual over-the-air encoding.
    `ble_uuid_cmp()` rejects on a type mismatch before ever comparing the
    value, so the original 128-bit constant could never have matched.
+5. `command_event_` (the `ble_npl_event` powering the M7 write path) was
+   initially set up with `ble_npl_event_init()` *before* `nimble_port_init()`.
+   On real hardware this crashed on every boot with a Guru Meditation Load
+   access fault, before any `ble_manager` log line ever printed --
+   `ble_npl_event_init()` draws from an NPL memory pool that
+   `nimble_port_init()` itself sets up, so calling it any earlier reads
+   that pool before it exists. Every other NimBLE call in `Init()` already
+   happens after `nimble_port_init()` for the same reason; this one just
+   wasn't obviously a NimBLE call by name. Fixed by moving the
+   `ble_npl_event_init()` call to immediately after `nimble_port_init()`
+   succeeds.
 
 **Detection strategy**: the appliance is identified solely by the 128-bit
 service UUID it advertises (`kGroheServiceUuid`), matched against the

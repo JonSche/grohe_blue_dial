@@ -9,13 +9,15 @@
 #include "freertos/queue.h"
 #include "host/ble_uuid.h"
 #include "nimble/ble.h"
+#include "nimble/nimble_npl.h"
 
-// BleCharacteristicEvent below needs ble_uuid_any_t by value, so ble_uuid.h
-// (lightweight -- type definitions only, no host-stack dependency) is
-// included directly. The remaining NimBLE GAP/GATT types, needed only as
-// callback parameters, are forward-declared so consumers of this header
-// (GroheClient, and through it app::App) don't also transitively pull in
-// host/ble_gap.h or host/ble_gatt.h.
+// BleCharacteristicEvent below needs ble_uuid_any_t by value, and
+// command_event_ below needs a ble_npl_event by value, so ble_uuid.h and
+// nimble_npl.h (both lightweight -- type definitions only, no host-stack
+// dependency) are included directly. The remaining NimBLE GAP/GATT types,
+// needed only as callback parameters, are forward-declared so consumers of
+// this header (GroheClient, and through it app::App) don't also
+// transitively pull in host/ble_gap.h or host/ble_gatt.h.
 struct ble_gap_event;
 struct ble_gap_disc_desc;
 struct ble_gatt_error;
@@ -81,6 +83,15 @@ enum class BleEventType {
   kHostReset,
   kDeviceFound,
   kReadyForProtocol,
+  // The CCCD write for the Grohe read characteristic succeeded (M6's
+  // subscribe sequence) -- the only way a caller on the app task can learn
+  // that notifications are actually enabled. Needed as of M7: hardware
+  // evidence shows kReadyForProtocol can fire *before* this completes (the
+  // two are independent async GATT procedures), so anything that needs to
+  // send a write and then rely on receiving a notification in response
+  // (see GroheClient's stop() probe) must gate on this event too, not just
+  // kReadyForProtocol.
+  kSubscribed,
   // One shared failure event for connect-timeout, connect-failure,
   // discovery-level GATT errors, and unexpected disconnects: `reason`
   // carries the specific NimBLE/HCI status code, and the detailed narrative
@@ -100,6 +111,8 @@ enum class BleEventType {
       return "DeviceFound";
     case BleEventType::kReadyForProtocol:
       return "ReadyForProtocol";
+    case BleEventType::kSubscribed:
+      return "Subscribed";
     case BleEventType::kConnectionFailed:
       return "ConnectionFailed";
   }
@@ -149,6 +162,22 @@ struct BleCharacteristicEvent {
   size_t payload_len = 0;
 };
 
+// A write request queued from the app task (via WriteCharacteristic()) for
+// the host task to actually issue -- the reverse direction of BleEvent/
+// BleCharacteristicEvent above, added in M7 so the app task never reads any
+// of BleManager's own state (conn_handle_ in particular) directly. See
+// command_queue_/command_event_'s own comments for the full mechanism.
+struct BleWriteCommand {
+  uint16_t val_handle = 0;
+  // Reuses BleCharacteristicEvent::kMaxPayloadSize: a write is bounded by
+  // the same negotiated-MTU ceiling as a notification, so there is no
+  // separate limit to invent here.
+  static constexpr size_t kMaxPayloadSize =
+      BleCharacteristicEvent::kMaxPayloadSize;
+  uint8_t payload[kMaxPayloadSize] = {};
+  size_t payload_len = 0;
+};
+
 // Owns the NimBLE host stack lifecycle and the BLE state machine. NimBLE's
 // GAP/GATT callbacks fire on NimBLE's own host task, never on the caller's
 // task -- BleManager hands them off through a bounded queue so nothing
@@ -176,8 +205,19 @@ struct BleCharacteristicEvent {
 // has ever touched this class's state, with no new cross-task access to
 // reason about.
 //
-// No writes, and no authentication, yet -- that's grohe_ble's next
-// milestone.
+// M7 adds the one exception to "no writes": WriteCharacteristic(), used by
+// GroheClient to send the confirmed stop() probe. Every other member this
+// class has ever had is touched exclusively by the NimBLE host task, with
+// no synchronization -- WriteCharacteristic() preserves that invariant with
+// zero exceptions rather than reading conn_handle_ (or anything else) from
+// the app task directly: it only ever enqueues a BleWriteCommand onto
+// command_queue_ and posts command_event_ to NimBLE's own default event
+// queue (nimble_port_get_dflt_eventq(), already serviced forever by
+// HostTask()'s nimble_port_run()), so the actual ble_gattc_write_flat()
+// call -- and its read of conn_handle_ -- still happens on the host task,
+// exactly like every other GATT call this class makes. This is the same
+// primitive NimBLE itself uses to marshal work onto that task, not a
+// bespoke mechanism layered on top of it.
 class BleManager {
  public:
   BleManager() = default;
@@ -204,6 +244,19 @@ class BleManager {
   // it's a second queue rather than folded into BleEvent).
   void PollCharacteristicEvents(
       const std::function<void(const BleCharacteristicEvent&)>& on_event);
+
+  // Queues a GATT write ("Write With Response", the only mode confirmed to
+  // work against this appliance) to val_handle. Safe to call from any task
+  // -- see the class comment above for the full mechanism. Returns
+  // ESP_ERR_INVALID_ARG if val_handle is 0 or data_len exceeds
+  // BleWriteCommand::payload's capacity, ESP_ERR_INVALID_STATE if the
+  // command queue is full (never expected at this milestone's one-write-
+  // per-connection usage), ESP_OK once the request is queued -- this says
+  // nothing about whether the write itself later succeeds; that arrives
+  // asynchronously (a log line on success, FailConnection() on failure,
+  // exactly like every other GATT procedure in this class).
+  esp_err_t WriteCharacteristic(uint16_t val_handle, const uint8_t* data,
+                               size_t data_len);
 
  private:
   static void HostTask(void* param);
@@ -277,6 +330,22 @@ class BleManager {
                      const struct ble_gatt_dsc* dsc);
   void HandleSubscribeWrite(const struct ble_gatt_error& error);
 
+  // ble_npl_event callback for command_event_ (see its own comment and the
+  // class comment above): resolved via instance_, same discipline as every
+  // other callback here, even though this specific event's arg is one this
+  // class sets itself (not an upstream NimBLE reattempt path). Drains
+  // command_queue_ and issues ble_gattc_write_flat() for each entry, on the
+  // host task.
+  static void OnCommandEvent(struct ble_npl_event* event);
+  void HandleCommandEvent();
+
+  // ble_gattc_write_flat() callback for a command from command_queue_, same
+  // "static trampoline resolves via instance_" shape as OnSubscribeWrite.
+  static int OnWriteResult(uint16_t conn_handle,
+                          const struct ble_gatt_error* error,
+                          struct ble_gatt_attr* attr, void* arg);
+  void HandleWriteResult(const struct ble_gatt_error& error);
+
   // BLE_GAP_EVENT_NOTIFY_RX handling: copies the payload out of the mbuf
   // (NimBLE frees it once OnGapEvent returns, same constraint M5 already
   // handled for GATT attr callbacks) and reports it on the characteristic
@@ -330,6 +399,29 @@ class BleManager {
   size_t next_svc_to_disc_ = 0;
 
   QueueHandle_t characteristic_queue_ = nullptr;
+
+  // App-task -> host-task write hand-off (M7): WriteCharacteristic() pushes
+  // onto command_queue_ (depth 2 -- this milestone issues exactly one write
+  // per connection; the small fixed depth matches this class's existing
+  // "size for the load this milestone actually has" precedent, not
+  // speculative future load) and posts command_event_ to NimBLE's default
+  // event queue, which HostTask()'s nimble_port_run() already services
+  // forever. OnCommandEvent() then drains command_queue_ and issues the
+  // actual GATT write from the host task -- see the class comment for why
+  // this exists instead of a synchronized conn_handle_.
+  //
+  // Known, currently-unreachable edge case for a future reconnect
+  // milestone: a queued command carries only a value handle, not a
+  // connection identity, so if a connection failed with a write still
+  // queued *and* a new connection reused the same numeric conn_handle_
+  // before HandleCommandEvent() drained it, the write would target the
+  // wrong peer. Not reachable today -- nothing reconnects after
+  // FailConnection() (kBackoff is still unused) -- but whoever adds
+  // reconnect should either drain/discard command_queue_ in
+  // FailConnection() or tag each BleWriteCommand with a connection
+  // generation counter.
+  QueueHandle_t command_queue_ = nullptr;
+  struct ble_npl_event command_event_ = {};
 
   // The read characteristic's value handle, non-zero from the moment it's
   // found until its subscribe sequence resolves one way or another (CCCD

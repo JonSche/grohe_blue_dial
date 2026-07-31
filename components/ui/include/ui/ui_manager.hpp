@@ -30,6 +30,9 @@ class UiManager {
   lv_obj_t* arc_ = nullptr;
   lv_obj_t* amount_label_ = nullptr;
   lv_obj_t* water_type_label_ = nullptr;
+  // M7: the one UI addition for the appliance's decoded protocol state --
+  // see Render()'s own implementation for exactly what it shows.
+  lv_obj_t* appliance_status_label_ = nullptr;
 };
 
 }  // namespace ui

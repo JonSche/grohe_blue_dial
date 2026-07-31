@@ -1,10 +1,12 @@
 #include "grohe_ble/grohe_protocol.hpp"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 #include "esp_log.h"
 #include "grohe_ble/ble_constants.hpp"
+#include "grohe_ble/grohe_auth.hpp"
 #include "host/ble_uuid.h"
 
 namespace grohe_ble {
@@ -126,7 +128,50 @@ void LogPacket(const char* direction, const ble_uuid_t& uuid,
              static_cast<unsigned>(len), hex);
   }
 }
+// Generous, checked bounds for the stop payload's components -- no exact
+// maximum length is confirmed by evidence for user_id or the pre-shared
+// key (neither the Python reference nor docs/EVIDENCE.md constrains
+// either), so every stage in BuildStopPayload() below is checked via
+// snprintf()'s/DecodePreSharedKey()'s own return value, never assumed to
+// fit.
+constexpr size_t kMaxHmacMessageSize = 160;
+constexpr size_t kMaxPreSharedKeySize = 64;
+constexpr size_t kMaxHmacBase64Size = 64;
+
 }  // namespace
+
+bool BuildStopPayload(const Credentials& credentials, uint32_t timestamp,
+                     char* out, size_t out_size) {
+  // protocol.py's DispenseCommand.hmac_message: "userId:timestamp:amount:taste",
+  // amount=0 and taste=0 for the confirmed stop command (stop_command()).
+  char message[kMaxHmacMessageSize];
+  const int message_len =
+      std::snprintf(message, sizeof(message), "%s:%u:0:0",
+                   credentials.user_id, static_cast<unsigned>(timestamp));
+  if (message_len < 0 ||
+      static_cast<size_t>(message_len) >= sizeof(message)) {
+    return false;
+  }
+
+  uint8_t key[kMaxPreSharedKeySize];
+  size_t key_len = 0;
+  if (!DecodePreSharedKey(credentials.pre_shared_key_base64, key,
+                         sizeof(key), &key_len)) {
+    return false;
+  }
+
+  // protocol.py's serialize_payload(): the HMAC signs `message` itself.
+  char hmac_base64[kMaxHmacBase64Size];
+  if (!ComputeHmacSha256Base64(key, key_len, message, hmac_base64,
+                              sizeof(hmac_base64))) {
+    return false;
+  }
+
+  // protocol.py's serialize_payload(): "{message}:{signature}".
+  const int written =
+      std::snprintf(out, out_size, "%s:%s", message, hmac_base64);
+  return written >= 0 && static_cast<size_t>(written) < out_size;
+}
 
 void GroheProtocol::HandleCharacteristicEvent(
     const BleCharacteristicEvent& event) {
@@ -167,6 +212,18 @@ void GroheProtocol::HandleNotification(uint16_t handle,
              handle, read_char_handle_);
   }
   LogPacket("RX", kGroheReadCharUuid.u, payload, payload_len);
+
+  // ApplianceState (M7) reflects only a successfully parsed response -- an
+  // unparseable payload is logged above (as hex) and left otherwise
+  // unhandled, per M6's rule that an unknown payload format is not an
+  // error and must not discard a previously-decoded state.
+  ParsedResponse parsed;
+  if (TryParseResponse(payload, payload_len, &parsed)) {
+    state_.received = true;
+    state_.timestamp = parsed.timestamp;
+    state_.response_code = parsed.code;
+    state_.is_success = parsed.code == 0;  // ResponseCode::SUCCESS
+  }
 }
 
 }  // namespace grohe_ble

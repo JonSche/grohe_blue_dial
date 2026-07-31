@@ -81,6 +81,17 @@ void UiManager::Init(lv_display_t* display) {
   lv_obj_set_style_text_font(hint_label, &lv_font_montserrat_14, 0);
   ApplyLetterSpacedCaps(hint_label);
   lv_obj_align(hint_label, LV_ALIGN_CENTER, 0, 66);
+
+  // M7: the appliance's decoded protocol state -- a compact technical
+  // readout, deliberately not letter-spaced like the labels above (this
+  // isn't a UI title, it's diagnostic text), kept short enough to fit the
+  // round display's narrowing chord this far from center (see Render()).
+  appliance_status_label_ = lv_label_create(screen);
+  lv_obj_set_style_text_color(appliance_status_label_, kMutedTextColor, 0);
+  lv_obj_set_style_text_opa(appliance_status_label_, LV_OPA_60, 0);
+  lv_obj_set_style_text_font(appliance_status_label_, &lv_font_montserrat_14,
+                             0);
+  lv_obj_align(appliance_status_label_, LV_ALIGN_CENTER, 0, 88);
 }
 
 void UiManager::Render(const dial_state::DialState& state) {
@@ -88,6 +99,21 @@ void UiManager::Render(const dial_state::DialState& state) {
   lv_label_set_text_fmt(amount_label_, "%d", state.amount_ml);
   lv_label_set_text(water_type_label_,
                      dial_state::WaterTypeLabel(state.water_type));
+
+  if (!state.appliance_response_received) {
+    lv_label_set_text(appliance_status_label_, "APPL --");
+  } else if (state.appliance_response_success) {
+    lv_label_set_text(appliance_status_label_, "APPL OK");
+  } else {
+    const char* name =
+        dial_state::ResponseCodeName(state.appliance_response_code);
+    if (name != nullptr) {
+      lv_label_set_text_fmt(appliance_status_label_, "APPL %s", name);
+    } else {
+      lv_label_set_text_fmt(appliance_status_label_, "APPL CODE %d",
+                            state.appliance_response_code);
+    }
+  }
 }
 
 }  // namespace ui
