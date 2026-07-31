@@ -31,6 +31,12 @@ constexpr UBaseType_t kEventQueueDepth = 8;
 // that so a fast discovery pass can never fill this queue before it's
 // drained.
 constexpr UBaseType_t kCharacteristicQueueDepth = 16;
+// This milestone (M7) issues exactly one write per connection (GroheClient's
+// stop() probe) -- depth 2 is already generous for that, matching this
+// class's existing "size for the load this milestone actually has"
+// precedent rather than the speculative multi-command load a future
+// control milestone might add.
+constexpr UBaseType_t kCommandQueueDepth = 2;
 
 // The standard Client Characteristic Configuration Descriptor UUID
 // (0x2902), used to find where to write to enable notifications. This one
@@ -237,6 +243,10 @@ BleManager::~BleManager() {
     vQueueDelete(characteristic_queue_);
     characteristic_queue_ = nullptr;
   }
+  if (command_queue_ != nullptr) {
+    vQueueDelete(command_queue_);
+    command_queue_ = nullptr;
+  }
   if (instance_ == this) {
     instance_ = nullptr;
   }
@@ -270,6 +280,13 @@ esp_err_t BleManager::Init() {
     return ESP_ERR_NO_MEM;
   }
 
+  command_queue_ =
+      xQueueCreate(kCommandQueueDepth, sizeof(BleWriteCommand));
+  if (command_queue_ == nullptr) {
+    ESP_LOGE(kTag, "xQueueCreate (command) failed");
+    return ESP_ERR_NO_MEM;
+  }
+
   instance_ = this;
   SetState(BleState::kInitializing);
 
@@ -278,6 +295,14 @@ esp_err_t BleManager::Init() {
     ESP_LOGE(kTag, "nimble_port_init failed: %s", esp_err_to_name(err));
     return err;
   }
+
+  // ble_npl_event_init() draws from an NPL memory pool that nimble_port_init()
+  // itself sets up -- calling this any earlier (confirmed on hardware: a
+  // Guru Meditation Load access fault, before any ble_manager log line)
+  // reads that pool before it exists. Every other NimBLE call in this
+  // function already happens after nimble_port_init() for the same reason;
+  // this one just wasn't obviously a NimBLE call by name.
+  ble_npl_event_init(&command_event_, &BleManager::OnCommandEvent, this);
 
   ble_hs_cfg.reset_cb = &BleManager::OnHostReset;
   ble_hs_cfg.sync_cb = &BleManager::OnHostSync;
@@ -315,6 +340,34 @@ void BleManager::PollCharacteristicEvents(
   while (xQueueReceive(characteristic_queue_, &event, 0) == pdTRUE) {
     on_event(event);
   }
+}
+
+esp_err_t BleManager::WriteCharacteristic(uint16_t val_handle,
+                                          const uint8_t* data,
+                                          size_t data_len) {
+  if (val_handle == 0 || data_len > BleWriteCommand::kMaxPayloadSize) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  if (command_queue_ == nullptr) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  BleWriteCommand cmd;
+  cmd.val_handle = val_handle;
+  std::memcpy(cmd.payload, data, data_len);
+  cmd.payload_len = data_len;
+
+  if (xQueueSend(command_queue_, &cmd, 0) != pdTRUE) {
+    ESP_LOGW(kTag, "command queue full, dropping write to handle=%u",
+             val_handle);
+    return ESP_ERR_INVALID_STATE;
+  }
+  // Wakes the host task's nimble_port_run() loop to actually process the
+  // command -- see the class comment in ble_manager.hpp for why this, and
+  // not a synchronized conn_handle_, is how the write reaches the host
+  // task.
+  ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &command_event_);
+  return ESP_OK;
 }
 
 void BleManager::SetState(BleState state) {
@@ -937,6 +990,72 @@ void BleManager::HandleSubscribeWrite(const struct ble_gatt_error& error) {
     return;
   }
   ESP_LOGI(kTag, "Subscribed to notifications successfully");
+  // M7: the only way the app task can learn notifications are enabled --
+  // see BleEventType::kSubscribed's own comment for why this can't just be
+  // inferred from kReadyForProtocol.
+  Enqueue(BleEvent{BleEventType::kSubscribed});
+}
+
+void BleManager::OnCommandEvent(struct ble_npl_event* event) {
+  // Resolved via instance_, not the event's own arg -- see the comment in
+  // OnGapEvent(). This arg is one this class sets itself (not an upstream
+  // NimBLE reattempt path), but resolving the same way everywhere keeps
+  // this file's callbacks uniform.
+  auto* self = instance_;
+  if (self == nullptr) {
+    return;
+  }
+  (void)event;
+  self->HandleCommandEvent();
+}
+
+void BleManager::HandleCommandEvent() {
+  BleWriteCommand cmd;
+  while (xQueueReceive(command_queue_, &cmd, 0) == pdTRUE) {
+    if (conn_handle_ == BLE_HS_CONN_HANDLE_NONE) {
+      // The connection ended between WriteCharacteristic() enqueuing this
+      // and the host task getting to it -- not a failure to report, since
+      // there is nothing left to report it to (FailConnection() has
+      // already run for whatever this connection was).
+      ESP_LOGD(kTag, "dropping queued write, no connection");
+      continue;
+    }
+    const int rc =
+        ble_gattc_write_flat(conn_handle_, cmd.val_handle, cmd.payload,
+                             cmd.payload_len, &BleManager::OnWriteResult,
+                             this);
+    if (rc != 0) {
+      FailConnection("ble_gattc_write_flat", rc);
+      return;
+    }
+  }
+}
+
+int BleManager::OnWriteResult(uint16_t conn_handle,
+                              const struct ble_gatt_error* error,
+                              struct ble_gatt_attr* /*attr*/, void* /*arg*/) {
+  // Resolved via instance_, not arg -- see the comment in OnGapEvent().
+  auto* self = instance_;
+  if (self == nullptr || error == nullptr) {
+    return 0;
+  }
+  if (conn_handle != self->conn_handle_) {
+    // Stale result for a connection this code has already moved on from --
+    // see the identical check in OnSvcDisc().
+    ESP_LOGD(kTag, "ignoring stale write result for conn_handle=%d",
+             conn_handle);
+    return 0;
+  }
+  self->HandleWriteResult(*error);
+  return 0;
+}
+
+void BleManager::HandleWriteResult(const struct ble_gatt_error& error) {
+  if (error.status != 0) {
+    FailConnection("write", error.status);
+    return;
+  }
+  ESP_LOGI(kTag, "Write succeeded");
 }
 
 void BleManager::HandleNotifyRx(const struct ble_gap_event& event) {

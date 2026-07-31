@@ -18,8 +18,11 @@ namespace app {
 //
 // GroheClient is polled the same way: App::Run()'s loop drains its event
 // queue every iteration, on this same task -- never from a BLE callback
-// (see grohe_ble/ble_manager.hpp). M3.1's callback only logs; DialState is
-// not touched by BLE yet.
+// (see grohe_ble/ble_manager.hpp). Lifecycle events are still just logged
+// (unchanged since M3.1); as of M7, the appliance's decoded protocol
+// response also reaches DialState, via DialController::HandleApplianceState()
+// -- the same "App hands GroheClient's output to DialController" pattern
+// the encoder loop already uses.
 class App {
  public:
   App() = default;

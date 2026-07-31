@@ -48,16 +48,19 @@ void App::Run() {
       state_changed = true;
     });
 
-    // Log-only: BLE has nothing to say about DialState yet (M5 connects
-    // and discovers the appliance's GATT hierarchy; it doesn't speak the
-    // protocol yet) -- see grohe_ble/grohe_client.hpp. M6 replaces this
-    // lambda's body with a call into DialController, the same way the
-    // encoder callback above already does; nothing about this loop's
-    // shape needs to change then.
+    // Lifecycle events are still just logged here (unchanged since M3.1);
+    // the appliance's decoded protocol state (M7) is read separately below
+    // via LatestApplianceState(), the same way encoder events above are
+    // handed to dial_controller_ -- Poll()'s signature and this call site
+    // don't otherwise change.
     grohe_client_.Poll([](const grohe_ble::BleEvent& event) {
       ESP_LOGI(kTag, "BLE event: %s (reason=%d)",
                grohe_ble::ToString(event.type), event.reason);
     });
+    if (dial_controller_.HandleApplianceState(
+            grohe_client_.LatestApplianceState())) {
+      state_changed = true;
+    }
 
     if (state_changed) {
       if (display::Gc9a01Display::Lock()) {

@@ -3,6 +3,18 @@
 #include <algorithm>
 
 #include "esp_log.h"
+#include "grohe_ble/grohe_protocol.hpp"
+
+// grohe_protocol.hpp transitively pulls in nimble/ble.h -> os/os.h, which
+// #defines min/max as macros -- undone immediately so std::min/std::max
+// below (in HandleEvent(), unrelated to BLE) keep meaning the standard
+// library functions, not this macro pair.
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 
 namespace app {
 namespace {
@@ -29,6 +41,21 @@ void DialController::HandleEvent(encoder::EncoderEvent event) {
                                : dial_state::WaterType::kStill;
       break;
   }
+}
+
+bool DialController::HandleApplianceState(
+    const grohe_ble::ApplianceState& appliance_state) {
+  if (!appliance_state.received) {
+    return false;  // Nothing decoded yet; state_ already reflects that.
+  }
+  const bool changed =
+      !state_.appliance_response_received ||
+      state_.appliance_response_success != appliance_state.is_success ||
+      state_.appliance_response_code != appliance_state.response_code;
+  state_.appliance_response_received = true;
+  state_.appliance_response_success = appliance_state.is_success;
+  state_.appliance_response_code = static_cast<int>(appliance_state.response_code);
+  return changed;
 }
 
 }  // namespace app

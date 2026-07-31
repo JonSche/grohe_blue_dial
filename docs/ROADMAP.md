@@ -61,7 +61,7 @@ just logging.
       out of scope for this milestone.
 - [ ] Real product decision on whether this is the final screen layout, or
       just the first cut -- this milestone is deliberately a single static
-      screen, no menus/pages (see M7/M8 for BLE-driven content and visual
+      screen, no menus/pages (see M8/M9 for BLE-driven content and visual
       polish).
 
 ## M3 — BLE client foundation
@@ -211,18 +211,62 @@ business logic, no state changes on the appliance.
       disconnect still works — zero crashes, zero queue-full events,
       zero regressions from M5.
 
-## M7 — Grohe Blue control
+## M7 — Appliance State Foundation ✅
+
+M6's hardware validation revealed that meaningful appliance state is not
+exposed passively over BLE — the Grohe read characteristic only ever
+carries data as an acknowledgement to a write, never as an unprompted
+status broadcast (confirmed against the Python reference's `client.py`
+and our own GATT captures; see
+[ARCHITECTURE.md](ARCHITECTURE.md#ble-grohe_ble)). This milestone is not
+appliance control: the sole write it permits is the existing,
+Python-validated, idempotent `stop()` command, used exclusively as a
+protocol activation / state-elicitation mechanism to trigger the
+acknowledgement flow ApplianceState is populated from — not as user-facing
+functionality. No dispense commands, water selection, or other appliance
+control are in scope.
+
+- [x] Send the confirmed `stop()` payload (`amount=0`, `taste=0`) once
+      per connection, purely to elicit the appliance's acknowledgement --
+      HMAC-signed via a new `grohe_auth` module (mbedTLS) and a gitignored,
+      swappable `CredentialsProvider` (`grohe_credentials`), mirroring the
+      Python reference's `auth.py`/gitignored `.env`.
+- [x] Decode the resulting notification into a structured
+      `ApplianceState`, extending `GroheProtocol`'s existing
+      `timestamp:responseCode` parser (ported from `protocol.py` in M6).
+      Documented every field's source/confidence/evidence, and explicitly
+      what appliance state is *not* available over BLE and why (see
+      [ARCHITECTURE.md](ARCHITECTURE.md#ble-grohe_ble)).
+- [x] `DialState` reflects the decoded `ApplianceState` (translated by
+      `app::DialController`, which is the only place that bridges
+      `dial_state`'s zero-dependency struct and `grohe_ble`'s type);
+      `UiManager` displays it. Protocol parsing stays out of UI code.
+- [x] `BleManager` gains a queued app-task → host-task write path
+      (`WriteCharacteristic()`, a new `command_queue_` +
+      `ble_npl_event`/`nimble_port_get_dflt_eventq()`) so the write reaches
+      the host task without adding any synchronized/cross-task member to
+      `BleManager` -- every member remains host-task-only, with zero
+      exceptions, exactly as before M7.
+- [x] A real hardware-discovered bug (an NPL event initialized before
+      `nimble_port_init()`, crashing every boot) found and fixed during
+      self-review -- see ARCHITECTURE.md's "Five hardware-discovered
+      robustness issues" section.
+- [x] Verified on hardware across 5 trials: `stop()` succeeds, the
+      acknowledgement arrives and decodes (`INVALID_HMAC`, expected with
+      placeholder credentials), `ApplianceState`/`DialState`/UI reflect it
+      stably, the probe fires exactly once per connection every time, and
+      clean disconnect still works -- zero crashes, zero regressions.
+
+## M8 — Grohe Blue control
 
 Depends on the BLE/GATT contract of the target appliance being defined.
 
-- [ ] Read appliance state (mode, filter status, whatever the real device
-      exposes) over BLE and reflect it in the UI.
-- [ ] Write commands from the dial (encoder + button) back to the
-      appliance.
+- [ ] Dispense commands and water selection from the dial (encoder +
+      button) back to the appliance.
 - [ ] Error/timeout handling for a lost or rejected connection, plus
       reconnect/backoff.
 
-## M8 — Product polish
+## M9 — Product polish
 
 - [ ] Settings persistence (NVS) — last-used mode, pairing info, etc.
 - [ ] OTA updates.
