@@ -48,13 +48,14 @@ void EncoderInput::Poll(const std::function<void(EncoderEvent)>& on_event) {
   button_was_pressed_ = pressed;
 }
 
-// TEMPORARY (M12.4 developer OTA validation hook) -- see the header's own
-// comment.
+#ifdef CONFIG_GROHE_DEV_FEATURES
+// Developer OTA validation hook only -- see the header's own comment.
 bool EncoderInput::IsHeldFor(int64_t threshold_us) const {
   if (!button_was_pressed_) {
     return false;
   }
   return (esp_timer_get_time() - press_start_us_) >= threshold_us;
 }
+#endif  // CONFIG_GROHE_DEV_FEATURES
 
 }  // namespace encoder

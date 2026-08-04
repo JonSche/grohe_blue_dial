@@ -1,0 +1,23 @@
+menu "Grohe Dial"
+
+    config GROHE_DEV_FEATURES
+        bool "Enable developer-only test features"
+        default n
+        help
+            Compiles in developer-only test hooks that have no place in a
+            normal build -- currently just the manual OTA validation hook:
+            holding the encoder button for ~5 s while the dial is idle logs
+            a request, calls OtaManager::CheckForUpdate() against a
+            compile-time test URL, and calls StartUpdate() if an update is
+            reported available. See kDeveloperOtaUrl in
+            components/app/app.cpp and EncoderInput::IsHeldFor() in
+            components/encoder/ for the implementation.
+
+            Disabled by default, and completely compiled out (no code, no
+            runtime cost) when disabled. Enable only on a development
+            build used to validate components/ota/ on real hardware --
+            never for a build meant to actually run day to day, since this
+            is a physical-access firmware-update trigger with no
+            authentication beyond "someone is holding the button".
+
+endmenu

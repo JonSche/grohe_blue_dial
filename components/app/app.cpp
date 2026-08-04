@@ -27,19 +27,19 @@ constexpr TickType_t kPollPeriod = pdMS_TO_TICKS(20);
 // Compile-time only, not a runtime setting, for now.
 constexpr uint32_t kDisplaySleepTimeoutMs = 60000;
 
-// ==== TEMPORARY (M12.4 developer OTA validation hook) ====
-// Delete this block, EncoderInput::IsHeldFor() (encoder_input.hpp/.cpp),
-// and the two "DEV HOOK" sites in Run() below once hardware validation of
-// components/ota/ is done -- see docs/ROADMAP.md's M12.4 entry. Reserved
+#ifdef CONFIG_GROHE_DEV_FEATURES
+// ==== Developer OTA validation hook (M12.4) ====
+// Gated behind CONFIG_GROHE_DEV_FEATURES (disabled by default -- see
+// main/Kconfig.projbuild) precisely so it compiles out of, and costs
+// nothing in, any build that doesn't explicitly ask for it. Reserved
 // purely for developer testing: normal dial operation (dispense, stop,
-// water type, display sleep, BLE) is completely unaffected unless this
-// exact gesture is used.
+// water type, display sleep, BLE) is completely unaffected either way.
 //
 // The one place the test OTA image URL is defined -- replace with a
 // real, reachable HTTPS URL before exercising this hook.
 constexpr char kDeveloperOtaUrl[] = "https://CHANGE-ME.example.com/grohe_dial.bin";
 constexpr int64_t kDevOtaHoldThresholdUs = 5'000'000;  // ~5 s.
-// ==== END TEMPORARY declarations ====
+#endif  // CONFIG_GROHE_DEV_FEATURES
 }  // namespace
 
 void App::Run() {
@@ -91,11 +91,13 @@ void App::Run() {
   int64_t last_activity_us = esp_timer_get_time();
   bool backlight_on = true;
 
-  // TEMPORARY (M12.4 dev hook) -- see kDeveloperOtaUrl's own comment.
-  // Fires the check/update once per continuous hold past the threshold
-  // (mirroring EncoderEvent::kLongPress's own "fire once, not
-  // repeatedly" behaviour), resetting the moment the button is released.
+#ifdef CONFIG_GROHE_DEV_FEATURES
+  // See kDeveloperOtaUrl's own comment. Fires the check/update once per
+  // continuous hold past the threshold (mirroring EncoderEvent::
+  // kLongPress's own "fire once, not repeatedly" behaviour), resetting
+  // the moment the button is released.
   bool dev_ota_hold_fired = false;
+#endif  // CONFIG_GROHE_DEV_FEATURES
 
   for (;;) {
     bool state_changed = false;
@@ -203,13 +205,11 @@ void App::Run() {
       backlight_on = false;
     }
 
-    // ==== TEMPORARY (M12.4 developer OTA validation hook) ====
-    // Delete this whole block (and dev_ota_hold_fired/kDeveloperOtaUrl/
-    // kDevOtaHoldThresholdUs/EncoderInput::IsHeldFor() above) once
-    // hardware validation of components/ota/ is done. Reserved purely
-    // for developer testing -- only reachable by deliberately holding
-    // the encoder button for ~5 s while idle; does nothing on every
-    // other input, and never runs automatically.
+#ifdef CONFIG_GROHE_DEV_FEATURES
+    // Developer OTA validation hook -- see main/Kconfig.projbuild's own
+    // help text. Only reachable by deliberately holding the encoder
+    // button for ~5 s while idle; does nothing on every other input, and
+    // never runs automatically. Entirely absent from a default build.
     if (encoder_input_.IsHeldFor(kDevOtaHoldThresholdUs)) {
       if (!dev_ota_hold_fired &&
           dispense_status == dial_state::DispenseStatus::kIdle) {
@@ -235,7 +235,7 @@ void App::Run() {
     } else {
       dev_ota_hold_fired = false;
     }
-    // ==== END TEMPORARY block ====
+#endif  // CONFIG_GROHE_DEV_FEATURES
 
     vTaskDelay(kPollPeriod);
   }

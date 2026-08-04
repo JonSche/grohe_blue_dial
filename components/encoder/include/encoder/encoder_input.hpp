@@ -6,6 +6,7 @@
 #include "encoder/button.hpp"
 #include "encoder/rotary_encoder.hpp"
 #include "esp_err.h"
+#include "sdkconfig.h"
 
 namespace encoder {
 
@@ -31,17 +32,19 @@ class EncoderInput {
 
   void Poll(const std::function<void(EncoderEvent)>& on_event);
 
-  // TEMPORARY (M12.4 developer OTA validation hook) -- remove this method
-  // along with every other site tagged "M12.4 dev hook" once hardware
-  // validation is done. True for as long as the button has been
-  // continuously held for at least `threshold_us`, read directly from the
-  // same press-timing state Poll() already tracks for the ordinary
-  // (600 ms) LongPress -- deliberately not a new EncoderEvent, so it adds
-  // no case to the enum or to any of its existing switch statements.
-  // Unlike EncoderEvent::kLongPress this stays true for the rest of the
-  // hold, not just a single edge -- callers wanting a one-shot trigger
-  // must debounce it themselves (see app.cpp's own dev-hook code).
+#ifdef CONFIG_GROHE_DEV_FEATURES
+  // Developer OTA validation hook only (see main/Kconfig.projbuild) --
+  // compiled out entirely unless CONFIG_GROHE_DEV_FEATURES is enabled.
+  // True for as long as the button has been continuously held for at
+  // least `threshold_us`, read directly from the same press-timing state
+  // Poll() already tracks for the ordinary (600 ms) LongPress --
+  // deliberately not a new EncoderEvent, so it adds no case to the enum
+  // or to any of its existing switch statements. Unlike
+  // EncoderEvent::kLongPress this stays true for the rest of the hold,
+  // not just a single edge -- callers wanting a one-shot trigger must
+  // debounce it themselves (see app.cpp's own dev-hook code).
   [[nodiscard]] bool IsHeldFor(int64_t threshold_us) const;
+#endif  // CONFIG_GROHE_DEV_FEATURES
 
  private:
   RotaryEncoder encoder_;

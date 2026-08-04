@@ -652,6 +652,17 @@ behaviour changed. See
       host, or serial monitor reachable from this environment. This is
       the same limitation every hardware-dependent milestone before
       this one has ended on.
+- [x] The manual developer OTA validation hook (5s encoder hold --
+      `app::App::Run()`, `EncoderInput::IsHeldFor()`) is gated behind
+      `CONFIG_GROHE_DEV_FEATURES` (`main/Kconfig.projbuild`), disabled
+      by default and fully compiled out (verified: the default build's
+      image size is identical with the option on vs. the implementation
+      removed entirely) rather than deleted -- kept available for the
+      still-outstanding on-hardware validation above, without shipping
+      an unauthenticated physical-access firmware-update trigger in any
+      normal build. See
+      [ARCHITECTURE.md](ARCHITECTURE.md#ota-m124)'s own "Developer OTA
+      validation hook" section.
 
 ## M13 — Home Assistant Integration
 

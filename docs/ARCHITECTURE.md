@@ -411,6 +411,24 @@ doesn't.
   caller wrapping `CheckForUpdate()`, not a change to `OtaManager`
   itself, which stays purely reactive.
 
+**Developer OTA validation hook**, `CONFIG_GROHE_DEV_FEATURES`
+(`main/Kconfig.projbuild`, disabled by default): since M13 doesn't exist
+yet, this is currently the only caller of `CheckForUpdate()`/
+`StartUpdate()` at all. Holding the encoder button for ~5 s while idle
+logs the request, calls `CheckForUpdate(kDeveloperOtaUrl)`, logs the
+result, and calls `StartUpdate(kDeveloperOtaUrl)` if an update is
+reported available (`app::App::Run()`, `EncoderInput::IsHeldFor()`).
+Every line of it -- both call sites in `app.cpp` and `IsHeldFor()` itself
+in `encoder_input.hpp`/`.cpp` -- is wrapped in
+`#ifdef CONFIG_GROHE_DEV_FEATURES`, so a default build (the option is
+`n` unless explicitly enabled) contains none of this code at all: no
+dead branches, no unreachable-but-linked functions, verified by
+comparing the default build's image size against a build with the
+implementation removed entirely (identical). This is a physical-access
+firmware-update trigger with no authentication beyond "someone is
+holding the button" -- appropriate for validating `components/ota/` on
+a development unit, never for a build meant to run day to day.
+
 ## Dispense UI (M11)
 
 Implements `docs/ui/dispense_animation_mockups.md` (the frozen UI spec)

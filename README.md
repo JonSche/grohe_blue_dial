@@ -12,18 +12,26 @@ to pour.
 ## Project
 
 Grohe Dial is native [ESP-IDF](https://github.com/espressif/esp-idf) (C++20)
-firmware for a round ESP32-C3 display/encoder module. It talks directly to a
-GROHE Blue Home appliance over BLE, using an independently reverse-engineered
-protocol (see [Reverse engineering](#reverse-engineering) below) — there is no
-cloud dependency and no GROHE app in the loop.
+production firmware for a round ESP32-C3 display/encoder module. It talks
+directly to a GROHE Blue Home appliance over BLE — there is no cloud
+dependency and no GROHE app in the loop.
+
+**This repository is the production firmware and the primary project.**
+GROHE publishes no protocol specification for this appliance, so the BLE
+protocol it speaks was independently reverse-engineered in a companion
+project, [`grohe_blue_ble`](https://github.com/JonSche/grohe_blue_ble), and
+re-implemented here from scratch as production firmware. That companion
+repository remains useful on its own as a protocol reference and a Python
+research toolkit for anyone exploring the appliance further, but this
+firmware does not depend on it at build or run time — see [Reverse
+engineering](#reverse-engineering) below for the full picture.
 
 - **ESP32-C3-based smart dial**: a 240×240 round display, a rotary encoder,
   and a push button are the entire user interface.
 - **Controls a GROHE Blue appliance over BLE**: authenticated dispense/stop
   commands, sent directly to the appliance.
-- **Reverse-engineered protocol**: no official SDK exists for this appliance;
-  the protocol was independently reverse-engineered and is implemented here
-  from first principles (own HMAC/payload code, own BLE state machine).
+- **Independently reverse-engineered protocol**: own HMAC/payload code, own
+  BLE state machine — implemented from scratch in this codebase.
 - **Home Assistant integration is optional, not required**: the dial is fully
   usable — dispense, stop, reconnect, everything — with no Home Assistant,
   no Wi-Fi even, present at all. A future, optional integration (see
@@ -159,23 +167,20 @@ caller-supplied HTTPS URL.
 
 ## Reverse engineering
 
-GROHE does not publish a protocol specification or SDK for this appliance.
 The BLE protocol this firmware speaks — service/characteristic layout,
 authenticated command format, response codes — was independently
 reverse-engineered from the official mobile app's own behavior and traffic,
-documented, and then re-implemented from scratch in this codebase.
+first in the companion
+[`grohe_blue_ble`](https://github.com/JonSche/grohe_blue_ble) project (see
+[Project](#project) above for how the two repositories relate), then
+documented and re-implemented from scratch as production firmware here.
 
 This repository does **not** contain decompiled app code. What it does
-contain:
-
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): this firmware's own
-  protocol write-up, including a per-field evidence/confidence table for
-  every piece of appliance state this firmware relies on.
-- A companion project,
-  [`grohe_blue_ble`](https://github.com/JonSche/grohe_blue_ble), holds the
-  original Python reference implementation and the underlying reverse-
-  engineering findings (packet captures, evidence notes) this firmware's
-  protocol layer was ported from.
+contain is [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): this firmware's
+own protocol write-up, including a per-field evidence/confidence table for
+every piece of appliance state it relies on. The original packet captures
+and reverse-engineering evidence notes live in `grohe_blue_ble`'s own
+documentation.
 
 ## Disclaimer
 
@@ -184,7 +189,7 @@ with, endorsed by, or sponsored by GROHE AG.
 
 ## Screenshots
 
-**UI concept**
+**UI concept** *(design mockup, not a live screen capture)*
 
 ![Grohe Dial UI mockup](docs/ui/mockups/hero-mockup.png)
 
@@ -202,8 +207,10 @@ with, endorsed by, or sponsored by GROHE AG.
 
 ## Roadmap
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full milestone-by-milestone
-history and what's planned next.
+[`docs/ROADMAP.md`](docs/ROADMAP.md) is organized as one section per
+milestone (M0 through M13), each with its own scope and, once complete, a
+hardware-validation summary — the authoritative history of how this
+firmware got to where it is today.
 
 ## Contributing
 
