@@ -26,6 +26,20 @@ constexpr TickType_t kPollPeriod = pdMS_TO_TICKS(20);
 // command, no controller reset, no LVGL pause, no framebuffer change).
 // Compile-time only, not a runtime setting, for now.
 constexpr uint32_t kDisplaySleepTimeoutMs = 60000;
+
+// ==== TEMPORARY (M12.4 developer OTA validation hook) ====
+// Delete this block, EncoderInput::IsHeldFor() (encoder_input.hpp/.cpp),
+// and the two "DEV HOOK" sites in Run() below once hardware validation of
+// components/ota/ is done -- see docs/ROADMAP.md's M12.4 entry. Reserved
+// purely for developer testing: normal dial operation (dispense, stop,
+// water type, display sleep, BLE) is completely unaffected unless this
+// exact gesture is used.
+//
+// The one place the test OTA image URL is defined -- replace with a
+// real, reachable HTTPS URL before exercising this hook.
+constexpr char kDeveloperOtaUrl[] = "https://CHANGE-ME.example.com/grohe_dial.bin";
+constexpr int64_t kDevOtaHoldThresholdUs = 5'000'000;  // ~5 s.
+// ==== END TEMPORARY declarations ====
 }  // namespace
 
 void App::Run() {
@@ -76,6 +90,12 @@ void App::Run() {
   // only resumes once the dial is back to its normal idle state.
   int64_t last_activity_us = esp_timer_get_time();
   bool backlight_on = true;
+
+  // TEMPORARY (M12.4 dev hook) -- see kDeveloperOtaUrl's own comment.
+  // Fires the check/update once per continuous hold past the threshold
+  // (mirroring EncoderEvent::kLongPress's own "fire once, not
+  // repeatedly" behaviour), resetting the moment the button is released.
+  bool dev_ota_hold_fired = false;
 
   for (;;) {
     bool state_changed = false;
@@ -182,6 +202,40 @@ void App::Run() {
       display_.SetBacklight(false);
       backlight_on = false;
     }
+
+    // ==== TEMPORARY (M12.4 developer OTA validation hook) ====
+    // Delete this whole block (and dev_ota_hold_fired/kDeveloperOtaUrl/
+    // kDevOtaHoldThresholdUs/EncoderInput::IsHeldFor() above) once
+    // hardware validation of components/ota/ is done. Reserved purely
+    // for developer testing -- only reachable by deliberately holding
+    // the encoder button for ~5 s while idle; does nothing on every
+    // other input, and never runs automatically.
+    if (encoder_input_.IsHeldFor(kDevOtaHoldThresholdUs)) {
+      if (!dev_ota_hold_fired &&
+          dispense_status == dial_state::DispenseStatus::kIdle) {
+        dev_ota_hold_fired = true;
+        ESP_LOGW(kTag, "DEV HOOK: manual OTA check requested (5s encoder hold)");
+        const ota::UpdateCheckResult check = ota_.CheckForUpdate(kDeveloperOtaUrl);
+        ESP_LOGW(kTag,
+                 "DEV HOOK: CheckForUpdate -> update_available=%d "
+                 "remote_version=\"%s\" last_error=%s",
+                 check.update_available, check.remote_version,
+                 esp_err_to_name(ota_.LastError()));
+        if (check.update_available) {
+          ESP_LOGW(kTag, "DEV HOOK: update available -- starting StartUpdate()");
+          const esp_err_t start_err = ota_.StartUpdate(kDeveloperOtaUrl);
+          // Only reached on failure -- StartUpdate() calls esp_restart()
+          // itself on success and never returns here.
+          ESP_LOGE(kTag, "DEV HOOK: StartUpdate failed: %s",
+                   esp_err_to_name(start_err));
+        } else {
+          ESP_LOGW(kTag, "DEV HOOK: no update available (or check failed) -- not starting");
+        }
+      }
+    } else {
+      dev_ota_hold_fired = false;
+    }
+    // ==== END TEMPORARY block ====
 
     vTaskDelay(kPollPeriod);
   }

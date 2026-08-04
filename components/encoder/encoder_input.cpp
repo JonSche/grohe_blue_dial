@@ -48,4 +48,13 @@ void EncoderInput::Poll(const std::function<void(EncoderEvent)>& on_event) {
   button_was_pressed_ = pressed;
 }
 
+// TEMPORARY (M12.4 developer OTA validation hook) -- see the header's own
+// comment.
+bool EncoderInput::IsHeldFor(int64_t threshold_us) const {
+  if (!button_was_pressed_) {
+    return false;
+  }
+  return (esp_timer_get_time() - press_start_us_) >= threshold_us;
+}
+
 }  // namespace encoder
