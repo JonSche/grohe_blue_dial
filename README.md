@@ -214,10 +214,10 @@ firmware got to where it is today.
 
 ## Contributing
 
-Issues and pull requests are welcome — this is a small, single-appliance
-project, so please open an issue to discuss anything non-trivial before
-sending a PR. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the
-component boundaries and conventions the codebase follows.
+Issues and pull requests are welcome — see
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for build instructions, coding style,
+and how to propose a change. Found a security issue instead? See
+[`SECURITY.md`](SECURITY.md).
 
 ## License
 
