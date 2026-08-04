@@ -362,12 +362,13 @@ dependency this milestone introduces).
       timestamps; confirmed no temporary/hardcoded timestamp code
       remains anywhere in the diff.
 
-## M10 — Medium Water Support
+## M10 — Water Type Support
 
 Connection reliability (reconnect/backoff) and the dispense/UI experience
 were both delivered ahead of schedule, in M11/M11.1 — the one remaining
-functional gap on the appliance-control side is water-type selection
-itself, still limited to the still/sparkling toggle M2 shipped with.
+functional gap on the appliance-control side is completing water-type
+support itself: still/sparkling has worked since M2, and **Medium** is
+the one remaining type to add.
 
 - [ ] Add **Medium** water as the third selectable water type.
 - [ ] Update the UI to support Still / Medium / Sparkling.
@@ -506,9 +507,17 @@ reinitialisation, no LVGL pause, no framebuffer change, only
 
 Developer- and release-focused tooling -- building, flashing, debugging,
 and shipping this firmware repeatably -- rather than further product
-features. The OTA-ready partition table itself was already delivered in
-M9; this milestone is the OTA *mechanism* on top of it, not a second,
+features. Ordered by development priority, not release priority: reliable
+debugging is worth more than OTA while firmware is still under active
+development. The OTA-ready partition table itself was already delivered
+in M9; this milestone is the OTA *mechanism* on top of it, not a second,
 duplicate migration.
+
+### Debugging
+
+- [ ] JTAG/OpenOCD setup.
+- [ ] VS Code launch configuration.
+- [ ] Debugging documentation.
 
 ### Flashing
 
@@ -516,11 +525,11 @@ duplicate migration.
 - [ ] Flash helper script(s).
 - [ ] Automatic serial-port detection where practical.
 
-### Debugging
+### Build & Release
 
-- [ ] JTAG/OpenOCD setup.
-- [ ] VS Code launch configuration.
-- [ ] Debugging documentation.
+- [ ] Embed firmware version.
+- [ ] Embed Git commit/version information.
+- [ ] Release build configuration.
 
 ### OTA
 
@@ -529,18 +538,16 @@ duplicate migration.
 - [ ] Rollback support.
 - [ ] OTA documentation.
 
-### Build & Release
-
-- [ ] Embed firmware version.
-- [ ] Embed Git commit/version information.
-- [ ] Release build configuration.
-
 ## M13 — Home Assistant Integration
 
-Optional enhancement, never a dependency: BLE dispensing and the dial's
-own UI must keep working exactly as they do today whether or not Home
-Assistant is present or reachable -- the same "optional, not a
-dependency" principle M9 already established for Wi-Fi/SNTP.
+Home Assistant extends the product; it never becomes a runtime dependency
+of it -- the same "optional, not a dependency" principle M9 already
+established for Wi-Fi/SNTP. Local BLE operation always has priority, and
+the dial must remain fully usable -- dispensing, stopping, reconnecting,
+everything it already does today -- whether or not Home Assistant is
+present or reachable. Home Assistant's role here is primarily
+configuration, diagnostics, and appliance status (CO₂, filter, firmware),
+not basic dispensing, which the dial already handles entirely on its own.
 
 - [ ] Home Assistant connectivity.
 - [ ] Display filter status.
@@ -550,3 +557,17 @@ dependency" principle M9 already established for Wi-Fi/SNTP.
 - [ ] Automatic entity discovery where appropriate.
 - [ ] BLE operation must continue to work fully when Home Assistant is
       unavailable.
+
+## v1.0 Release Criteria
+
+What "version 1.0" means for this project -- the minimum bar for the
+first production release, not a milestone in itself.
+
+- [ ] M10 completed.
+- [ ] M12 completed.
+- [ ] M13 completed.
+- [ ] Stable hardware validation.
+- [ ] Reliable flashing workflow.
+- [ ] Reliable debugging.
+- [ ] No known critical defects.
+- [ ] Complete documentation.
