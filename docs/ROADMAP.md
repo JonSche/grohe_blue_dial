@@ -1,8 +1,9 @@
 # Roadmap
 
-Milestones for Grohe Dial. Later milestones are provisional — revisit and
-reorder as the actual BLE contract with the Grohe Blue appliance becomes
-known.
+Milestones for Grohe Dial. The Grohe Blue BLE contract (M3–M9) and the
+core dispense experience (M11) are implemented and hardware-validated;
+remaining milestones extend product scope (M10, M13) and developer/
+production tooling (M12) on top of that foundation.
 
 ## M0 — Raw hardware bring-up ✅
 
@@ -56,12 +57,13 @@ just logging.
       every change.
 - [x] Interaction: rotate = ±100 ml (clamped 100-2000), short press = logs
       a dispense request (no BLE), long press = toggles still/sparkling.
-- [ ] Backlight/idle handling (dim or blank after inactivity,
-      `Gc9a01Display::SetBacklight()` already supports on/off) -- deferred,
-      out of scope for this milestone.
+- [x] Backlight/idle handling (dim or blank after inactivity,
+      `Gc9a01Display::SetBacklight()` already supports on/off) -- delivered
+      in [M11.2](#m112--display-sleep) once there was a real dispense
+      state machine to keep the display awake for.
 - [ ] Real product decision on whether this is the final screen layout, or
       just the first cut -- this milestone is deliberately a single static
-      screen, no menus/pages (see M10/M11 for BLE-driven content and visual
+      screen, no menus/pages (see M11 for BLE-driven content and visual
       polish).
 
 ## M3 — BLE client foundation
@@ -92,8 +94,10 @@ connecting, or discovery yet.
       stability issues (see M3.2).
 - [x] Scanning — see M4 below.
 - [x] Connecting, GATT discovery — see M5 below.
-- [ ] Reconnect/backoff — deferred until the Grohe Blue's actual GATT
-      contract is known and there's real protocol work to reconnect *for*.
+- [x] Reconnect/backoff — deferred at the time (the Grohe Blue's actual
+      GATT contract wasn't known yet, so there was no real protocol work
+      to reconnect *for*); delivered once it was, in
+      [M11.1](#m111--ui--connection-polish).
 
 ### M3.2 — Display: LVGL partial rendering ✅
 
@@ -348,7 +352,7 @@ dependency this milestone introduces).
       ~448 KB image-size cost -- addressed with a custom, OTA-ready
       partition table (see [ARCHITECTURE.md](ARCHITECTURE.md#flash-layout-m9))
       rather than just enlarging the old single-partition layout, so OTA
-      (M11) never needs a second, disruptive migration.
+      (M12) never needs a second, disruptive migration.
 - [x] Verified on hardware with real Wi-Fi credentials: SNTP sync
       succeeds and tears down cleanly; BLE connection/discovery success
       rate showed no regression versus the existing ~64% baseline failure
@@ -358,19 +362,191 @@ dependency this milestone introduces).
       timestamps; confirmed no temporary/hardcoded timestamp code
       remains anywhere in the diff.
 
-## M10 — Grohe Blue control
+## M10 — Medium Water Support
 
-- [ ] Broader water-type selection (beyond the existing still/sparkling
-      toggle), if the product direction calls for it.
-- [ ] Error/timeout handling for a lost or rejected connection, plus
-      reconnect/backoff.
+Connection reliability (reconnect/backoff) and the dispense/UI experience
+were both delivered ahead of schedule, in M11/M11.1 — the one remaining
+functional gap on the appliance-control side is water-type selection
+itself, still limited to the still/sparkling toggle M2 shipped with.
 
-## M11 — Product polish
+- [ ] Add **Medium** water as the third selectable water type.
+- [ ] Update the UI to support Still / Medium / Sparkling.
+- [ ] Extend the payload mapping (`WaterType`,
+      `ToGroheWaterType()`/`BuildDispensePayload()`) as required.
+- [ ] Validate on hardware.
+- [ ] Document the mapping in `ARCHITECTURE.md`.
 
-- [ ] Settings persistence (NVS) — last-used mode, pairing info, etc.
-- [ ] OTA updates -- the partition table (M9) is already OTA-ready
-      (`ota_0`/`ota_1` + `otadata`); this item is the `esp_https_ota`
-      integration itself.
-- [ ] Power/sleep management appropriate for a countertop device.
-- [ ] Real visual design pass on `ui/` (the M1 boot screen is a
-      placeholder, not the intended final look).
+## M11 — Dispense UI Implementation ✅
+
+Implements `docs/ui/dispense_animation_mockups.md` (the frozen, approved UI
+specification produced by this repo's own design-study sessions) exactly:
+the ring holds one invariant meaning from Ready through Finished, delivered
+volume counts up, a small travelling highlight communicates active flow
+without the ring itself ever changing, and the two connectivity glyphs
+(Interior Crown placement) present the full Connecting/Time Sync/Ready/
+Connection Lost/No Time state machine. No BLE protocol, `GroheProtocol`,
+`GroheClient`, `TimeProvider`, Wi-Fi, or `DispenseSession` timing-model code
+changed -- see [ARCHITECTURE.md](ARCHITECTURE.md#dispense-ui-m11) for the
+handful of implementation-level decisions the spec's illustrative mockups
+didn't pin down (the BLE-readiness double-observation, the Time Sync/No
+Time timeout, water-type de-emphasis via opacity rather than a smaller
+font, and the one deliberate simplification: Stopping/Finished's screen-
+wide text transitions are immediate swaps, not literal timed cross-fades).
+
+- [x] `dial_state::DispenseStatus` gains `kStopping`/`kFinished`;
+      `dial_state::ConnectionStatus`/`TimeStatus` added, replacing the
+      plain `time_available` bool. `DialState` gains
+      `active_dispense_amount_ml` (the ring's frozen invariant value,
+      distinct from the live, still-rotatable `amount_ml`) and
+      `delivered_ml` (the count-up value, rounded to the spec's 10 ml
+      cadence before it ever reaches `UiManager`).
+- [x] `DispenseSession::DurationUs()` added (the timing model itself is
+      unchanged) so `DialController::Tick()` can derive delivered volume
+      without `DispenseSession` needing to know about millilitres.
+- [x] `DialController`: `HandleReadyForProtocol()`/`HandleSubscribed()`
+      (BLE readiness, observed independently of `GroheClient` -- see
+      ARCHITECTURE.md), a stop-request now enters `kStopping` optimistically
+      and reverts to `kDispensing` on a rejected acknowledgement rather than
+      silently doing nothing, and `Tick()` holds `kFinished` for ~400 ms
+      (the checkmark) before returning to `kIdle`.
+- [x] `UiManager`: the ring's fill is set once per state entry and never
+      touched again mid-dispense; a second small `lv_arc` (the travelling
+      highlight) oscillates within the dialled arc via `lv_anim_t` -- or,
+      for small selections with no room to read as "travelling", breathes
+      in place instead; the startup pulse, sync-sweep, and connecting-halo
+      are likewise plain `lv_anim_t` animations, none of them touching the
+      main ring. `LV_SYMBOL_OK` (not a raw Unicode check mark, which this
+      build's compiled fonts don't include) is the Finished checkmark.
+- [x] Self-review: every animated element traced back to a concrete LVGL
+      primitive with a bounded redraw scope (matching the frozen spec's own
+      "LVGL/ESP32-C3 implementability" verification table); no dead code
+      (the old `time_available`-driven "NO TIME" branch is fully removed,
+      not left stubbed); no debug logging added.
+- [x] Verified on hardware: the full validation matrix (100/500/1000/
+      2000 ml, completed/stopped/disconnected-mid-dispense) passed,
+      together with the connection-reliability and display-sleep behaviour
+      layered on top in [M11.1](#m111--ui--connection-polish)/
+      [M11.2](#m112--display-sleep) -- dispense, stop, UI transitions,
+      automatic reconnect, and the display staying awake through an
+      entire pour all confirmed on the physical dial.
+
+### M11.1 — UI & Connection Polish ✅
+
+Two small improvements found during real hardware testing of M11 — a
+polish pass, not a redesign: no protocol/auth/timing-model changes, no
+dispense-behaviour changes, the M11 frozen UI spec's visual layout
+untouched. See [ARCHITECTURE.md](ARCHITECTURE.md#status-text-polish-m111)
+and [ARCHITECTURE.md](ARCHITECTURE.md#ble-grohe_ble)'s "Automatic
+reconnect (M11.1)" for the implementation-level decisions.
+
+- [x] Removed the separate `appliance_status_label_` ("APPL OK" / "APPL
+      INVALID_HMAC" / "APPL CODE n") from the UI entirely — those are raw
+      protocol response codes, useful during M6–M9's reverse-engineering,
+      not appropriate for a production screen. The decoded response is
+      still captured (`DialController::HandleApplianceState()`,
+      unchanged) and now logged instead of displayed.
+- [x] Rewrote `hint_label_`'s priority ladder to the milestone's own
+      7-state table: Ready shows no text (was "PRESS TO POUR"); Connection
+      Lost and no-time-yet both read in sentence case ("Connection lost",
+      "Synchronising..." — the latter now shared by both `TimeStatus`
+      states, previously two different messages); Dispensing/Stopping
+      keep their existing meaning, with only Dispensing ("PRESS TO STOP")
+      staying upper-case per the given spec.
+- [x] `BleManager` gains automatic reconnect: every existing failure path
+      (already funneled through `FailConnection()`) now schedules a retry
+      via `BleState::kBackoff` and a one-shot `esp_timer` — the "1s → 2s →
+      5s → 5s → ..." schedule this milestone asked for, reset on the next
+      successful connection, retrying indefinitely. The retry itself
+      re-invokes the existing `StartScan()` — no duplicated connection
+      logic, no BLE-architecture changes (still every NimBLE call on the
+      host task, via the same cross-task event hand-off
+      `WriteCharacteristic()` already used).
+- [x] Closed the `command_queue_` staleness race this class's own
+      pre-M11.1 comment had already flagged as latent (a queued write
+      surviving into a reconnected, differently-identitied connection) —
+      `FailConnection()` now drains it before scheduling a retry.
+- [x] `DialController` gained a small, purely cosmetic
+      `connection_lost_until_us_` hold (same shape as the pre-existing
+      `finished_until_us_`) so "Connection Lost" is genuinely shown only
+      briefly (~1 s) before switching to "Connecting..." for the rest of
+      BleManager's own (longer) retry loop — without this, the dial would
+      have shown "Connection lost" for the entire reconnect, however long
+      it took.
+- [x] Verified on hardware: APPL text is gone and the Ready screen reads
+      cleanly; the appliance was power-cycled, Bluetooth toggled off/on,
+      and the dial walked out of range -- in every case it reconnected
+      automatically with no duplicate connection attempts, and dispensing
+      worked normally afterward.
+
+### M11.2 — Display Sleep ✅
+
+Backlight-only inactivity timeout, added as a follow-up once M11's
+Dispensing/Stopping states existed to define what "active" means for a
+dispense appliance -- the deliberately minimal version of the item M2
+originally deferred: no LCD sleep command, no controller reset, no
+reinitialisation, no LVGL pause, no framebuffer change, only
+`Gc9a01Display::SetBacklight()`.
+
+- [x] `app::App::Run()` gained a single `kDisplaySleepTimeoutMs = 60000`
+      compile-time constant (the sole source of truth -- not a runtime
+      setting) and a small `last_activity_us`/`backlight_on` pair, entirely
+      local to the existing poll loop; no new task, no new timer, no
+      display-driver change.
+- [x] Activity is: any encoder event (rotate or press), or the dial being
+      in `DispenseStatus::kDispensing`/`kStopping` -- the display must
+      never sleep mid-pour or mid-stop, however long either takes.
+      `kFinished`/`kIdle` are not activity by themselves; the timeout
+      resumes counting once the dial is back to normal idle.
+- [x] Verified on hardware: the display turns off after 60 s of genuine
+      inactivity, rotating or pressing the encoder wakes it immediately
+      and restarts the timer, and it stays on for the entire duration of
+      a dispense/stop even when that exceeds 60 s.
+
+## M12 — Development & Deployment
+
+Developer- and release-focused tooling -- building, flashing, debugging,
+and shipping this firmware repeatably -- rather than further product
+features. The OTA-ready partition table itself was already delivered in
+M9; this milestone is the OTA *mechanism* on top of it, not a second,
+duplicate migration.
+
+### Flashing
+
+- [ ] Simple flashing workflow.
+- [ ] Flash helper script(s).
+- [ ] Automatic serial-port detection where practical.
+
+### Debugging
+
+- [ ] JTAG/OpenOCD setup.
+- [ ] VS Code launch configuration.
+- [ ] Debugging documentation.
+
+### OTA
+
+- [ ] HTTPS OTA (`esp_https_ota`) using the existing M9 partition table
+      (`ota_0`/`ota_1` + `otadata`).
+- [ ] Rollback support.
+- [ ] OTA documentation.
+
+### Build & Release
+
+- [ ] Embed firmware version.
+- [ ] Embed Git commit/version information.
+- [ ] Release build configuration.
+
+## M13 — Home Assistant Integration
+
+Optional enhancement, never a dependency: BLE dispensing and the dial's
+own UI must keep working exactly as they do today whether or not Home
+Assistant is present or reachable -- the same "optional, not a
+dependency" principle M9 already established for Wi-Fi/SNTP.
+
+- [ ] Home Assistant connectivity.
+- [ ] Display filter status.
+- [ ] Display CO₂ status.
+- [ ] Display firmware information.
+- [ ] Optional configuration through Home Assistant.
+- [ ] Automatic entity discovery where appropriate.
+- [ ] BLE operation must continue to work fully when Home Assistant is
+      unavailable.
