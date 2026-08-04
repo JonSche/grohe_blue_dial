@@ -31,9 +31,17 @@ class DispenseSession {
   // 0 when !active().
   [[nodiscard]] int64_t Remaining(int64_t now_us) const;
 
+  // The total predicted duration set by the most recent Start() call, in
+  // microseconds -- exposed (M11) so a caller that already knows the
+  // dispensed amount can derive delivered volume (amount_ml * elapsed /
+  // duration) without this class needing to know about milliliters at
+  // all. 0 when !active(), matching Remaining()'s own convention.
+  [[nodiscard]] int64_t DurationUs() const { return active_ ? duration_us_ : 0; }
+
  private:
   bool active_ = false;
   int64_t end_time_us_ = 0;
+  int64_t duration_us_ = 0;
 };
 
 }  // namespace app

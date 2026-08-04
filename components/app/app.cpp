@@ -1,6 +1,7 @@
 #include "app/app.hpp"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -15,6 +16,15 @@ constexpr char kTag[] = "app";
 // see. Inherited unmeasured from M1's log-only poll loop at 50ms; retuned
 // for M2 now that this loop drives real-time UI feedback.
 constexpr TickType_t kPollPeriod = pdMS_TO_TICKS(20);
+
+// Display sleep: how long the dial waits with no activity (encoder input,
+// or an active dispense -- see App::Run()'s activity computation) before
+// turning the backlight off. Deliberately the only knob this feature has
+// -- see SetBacklight()'s own call sites below for the intentionally
+// minimal implementation this drives (backlight only; no LCD sleep
+// command, no controller reset, no LVGL pause, no framebuffer change).
+// Compile-time only, not a runtime setting, for now.
+constexpr uint32_t kDisplaySleepTimeoutMs = 60000;
 }  // namespace
 
 void App::Run() {
@@ -41,9 +51,23 @@ void App::Run() {
 
   ESP_LOGI(kTag, "Startup complete");
 
+  // Display sleep (backlight only -- see kDisplaySleepTimeoutMs's own
+  // comment): last_activity_us resets on any encoder event, and is held
+  // continuously refreshed for as long as the dispense interaction is
+  // still in progress from the user's perspective -- dispense_status ==
+  // kDispensing or kStopping (see the activity computation below). The
+  // display must never sleep mid-pour or mid-stop, however long either
+  // takes. kFinished/kIdle are not activity by themselves: the timeout
+  // only resumes once the dial is back to its normal idle state.
+  int64_t last_activity_us = esp_timer_get_time();
+  bool backlight_on = true;
+
   for (;;) {
     bool state_changed = false;
-    encoder_input_.Poll([this, &state_changed](encoder::EncoderEvent event) {
+    bool encoder_activity = false;
+    encoder_input_.Poll([this, &state_changed,
+                         &encoder_activity](encoder::EncoderEvent event) {
+      encoder_activity = true;
       const app::DialAction action = dial_controller_.HandleEvent(event);
       state_changed = true;
       switch (action) {
@@ -65,15 +89,35 @@ void App::Run() {
     });
 
     // Lifecycle events are still just logged here (unchanged since M3.1),
-    // except for kConnectionFailed, which also forces DialController back
-    // to Idle (M8's "disconnect during dispense" requirement).
+    // except for kConnectionFailed (M8's "disconnect during dispense"
+    // requirement) and, as of M11, kReadyForProtocol/kSubscribed -- the
+    // same two events grohe_client_ itself gates protocol writes on,
+    // observed here a second time purely to drive the UI's
+    // connection_status (see dial_state.hpp's ConnectionStatus comment for
+    // why this doesn't require changing GroheClient).
     grohe_client_.Poll([this, &state_changed](const grohe_ble::BleEvent& event) {
       ESP_LOGI(kTag, "BLE event: %s (reason=%d)",
                grohe_ble::ToString(event.type), event.reason);
-      if (event.type == grohe_ble::BleEventType::kConnectionFailed) {
-        if (dial_controller_.HandleConnectionLost()) {
-          state_changed = true;
-        }
+      switch (event.type) {
+        case grohe_ble::BleEventType::kConnectionFailed:
+          if (dial_controller_.HandleConnectionLost()) {
+            state_changed = true;
+          }
+          break;
+        case grohe_ble::BleEventType::kReadyForProtocol:
+          if (dial_controller_.HandleReadyForProtocol()) {
+            state_changed = true;
+          }
+          break;
+        case grohe_ble::BleEventType::kSubscribed:
+          if (dial_controller_.HandleSubscribed()) {
+            state_changed = true;
+          }
+          break;
+        case grohe_ble::BleEventType::kHostSynced:
+        case grohe_ble::BleEventType::kHostReset:
+        case grohe_ble::BleEventType::kDeviceFound:
+          break;
       }
     });
     if (dial_controller_.HandleApplianceState(
@@ -96,6 +140,32 @@ void App::Run() {
         ui_.Render(dial_controller_.State());
         display::Gc9a01Display::Unlock();
       }
+    }
+
+    // Display sleep: wake immediately on encoder activity, sleep after
+    // kDisplaySleepTimeoutMs with none -- except while a dispense
+    // interaction is still in progress from the user's perspective
+    // (kDispensing or kStopping), which counts as continuous activity so
+    // the display can never time out mid-pour or mid-stop. Backlight only
+    // -- see kDisplaySleepTimeoutMs's own comment for everything this
+    // deliberately doesn't touch.
+    const dial_state::DispenseStatus dispense_status =
+        dial_controller_.State().dispense_status;
+    const bool keep_display_awake =
+        dispense_status == dial_state::DispenseStatus::kDispensing ||
+        dispense_status == dial_state::DispenseStatus::kStopping;
+    const int64_t now_us = esp_timer_get_time();
+    if (encoder_activity || keep_display_awake) {
+      last_activity_us = now_us;
+      if (!backlight_on) {
+        display_.SetBacklight(true);
+        backlight_on = true;
+      }
+    } else if (backlight_on &&
+               now_us - last_activity_us >=
+                   static_cast<int64_t>(kDisplaySleepTimeoutMs) * 1000) {
+      display_.SetBacklight(false);
+      backlight_on = false;
     }
 
     vTaskDelay(kPollPeriod);

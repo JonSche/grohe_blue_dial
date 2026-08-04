@@ -5,6 +5,7 @@
 #include <functional>
 
 #include "esp_err.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "host/ble_uuid.h"
@@ -31,8 +32,10 @@ namespace grohe_ble {
 // Full BLE connection lifecycle. As of M5,
 // Idle -> Initializing -> Scanning -> DeviceFound -> Connecting ->
 // Connected -> DiscoveringServices -> ReadyForProtocol is reachable end to
-// end; kReady and kBackoff remain reserved for a future milestone (protocol
-// communication and reconnect, respectively).
+// end; kReady remains reserved for a future milestone (protocol-level
+// readiness distinct from GATT readiness). kBackoff (M11.1): entered by
+// FailConnection() while waiting out the current retry delay -- see
+// ScheduleReconnect()'s own comment.
 enum class BleState {
   kIdle,
   kInitializing,
@@ -357,8 +360,32 @@ class BleManager {
   // Logs the failure, tears down the connection if one exists, and reports
   // it through the queue. Shared by every failure path (connect
   // timeout/failure, discovery-level GATT error, unexpected disconnect,
-  // subscribe failure).
+  // subscribe failure). As of M11.1, also drains command_queue_ (a write
+  // queued against the connection that just failed must never be issued
+  // against whatever connection comes next -- see command_queue_'s own
+  // comment) and calls ScheduleReconnect().
   void FailConnection(const char* what, int reason);
+
+  // M11.1: starts backoff_timer_ (a one-shot esp_timer) for
+  // kBackoffDelaysMs[backoff_index_] and enters kBackoff. The timer
+  // callback (OnBackoffTimer, running on the esp_timer task, not the host
+  // task) only posts reconnect_event_ to NimBLE's own default event queue
+  // -- the same cross-task hand-off command_event_ already uses -- so the
+  // actual retry (HandleReconnectEvent(), calling StartScan()) still runs
+  // on the host task like every other NimBLE call this class makes.
+  // Always retries: "the appliance is powered off" and "walked out of
+  // range" both look like an ordinary scan that just hasn't found anything
+  // yet, not a reason to stop.
+  void ScheduleReconnect();
+  static void OnBackoffTimer(void* arg);
+  static void OnReconnectEvent(struct ble_npl_event* event);
+  // Re-invokes StartScan() -- the same entry point the very first
+  // connection used, not a separate reconnect path -- once backoff_timer_
+  // fires. Guarded by state_ == kBackoff so a stray/late timer fire after
+  // the state has already moved on for an unrelated reason (e.g. a host
+  // reset landed mid-wait and OnHostSync() already restarted scanning) is
+  // a safe no-op rather than a duplicate scan.
+  void HandleReconnectEvent();
 
   void SetState(BleState state);
   void Enqueue(const BleEvent& event);
@@ -410,18 +437,32 @@ class BleManager {
   // actual GATT write from the host task -- see the class comment for why
   // this exists instead of a synchronized conn_handle_.
   //
-  // Known, currently-unreachable edge case for a future reconnect
-  // milestone: a queued command carries only a value handle, not a
-  // connection identity, so if a connection failed with a write still
-  // queued *and* a new connection reused the same numeric conn_handle_
-  // before HandleCommandEvent() drained it, the write would target the
-  // wrong peer. Not reachable today -- nothing reconnects after
-  // FailConnection() (kBackoff is still unused) -- but whoever adds
-  // reconnect should either drain/discard command_queue_ in
-  // FailConnection() or tag each BleWriteCommand with a connection
-  // generation counter.
+  // A queued command carries only a value handle, not a connection
+  // identity, so if a connection failed with a write still queued *and* a
+  // new connection reused the same numeric conn_handle_ before
+  // HandleCommandEvent() drained it, the write would target the wrong
+  // peer. Reachable as of M11.1 (reconnect exists now) -- FailConnection()
+  // drains command_queue_ itself before scheduling a retry, closing this
+  // rather than tagging each BleWriteCommand with a connection generation
+  // counter.
   QueueHandle_t command_queue_ = nullptr;
   struct ble_npl_event command_event_ = {};
+
+  // M11.1 automatic reconnect. backoff_index_ selects the current delay
+  // from kBackoffDelaysMs (ble_manager.cpp) and clamps at the array's last
+  // entry rather than growing further -- "1s -> 2s -> 5s -> 5s -> ...".
+  // Reset to 0 the moment DiscoverNextServiceChrs() reaches
+  // kReadyForProtocol (this class's own definition of "a successful
+  // connection", already the milestone every other part of this class
+  // treats as meaningful). backoff_timer_ is created once in Init() and
+  // reused (esp_timer_start_once()) for every retry, never recreated.
+  // reconnect_event_ mirrors command_event_'s shape exactly, for the same
+  // reason: a static ble_npl_event this class owns, posted to NimBLE's own
+  // event queue to marshal a callback from the esp_timer task onto the
+  // host task.
+  size_t backoff_index_ = 0;
+  esp_timer_handle_t backoff_timer_ = nullptr;
+  struct ble_npl_event reconnect_event_ = {};
 
   // The read characteristic's value handle, non-zero from the moment it's
   // found until its subscribe sequence resolves one way or another (CCCD

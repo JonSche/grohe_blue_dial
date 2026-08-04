@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1160 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The ring continuously tracks the encoder across the full amount range">
+<defs>
+<style>text{font-family:'Montserrat','Helvetica Neue',Arial,sans-serif;}</style>
+<linearGradient id="ebezel" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0" stop-color="#5a5f66"/><stop offset="0.3" stop-color="#c9ced4"/>
+<stop offset="0.55" stop-color="#8b9199"/><stop offset="1" stop-color="#33363b"/>
+</linearGradient>
+<marker id="earrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#5a6472"/>
+</marker>
+</defs>
+<rect width="1160" height="320" fill="#0b0d10"/>
+<text x="580" y="26" text-anchor="middle" font-size="13" fill="#8a93a6">rotating the encoder redraws this arc continuously — four sample points along one smooth sweep</text>
+<line x1="265" y1="196" x2="305" y2="196" stroke="#5a6472" stroke-width="2" marker-end="url(#earrow)"/>
+<line x1="555" y1="196" x2="595" y2="196" stroke="#5a6472" stroke-width="2" marker-end="url(#earrow)"/>
+<line x1="845" y1="196" x2="885" y2="196" stroke="#5a6472" stroke-width="2" marker-end="url(#earrow)"/>
+
+<!-- 100 ml -->
+<g transform="translate(20,76)">
+<text x="120" y="-14" text-anchor="middle" font-size="14" font-weight="600" fill="#f0f2f5">100 ml (minimum)</text>
+<circle cx="120" cy="120" r="116" fill="none" stroke="url(#ebezel)" stroke-width="6"/>
+<circle cx="120" cy="120" r="108" fill="#101418"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#2a3038" stroke-width="10"/>
+<text x="120" y="121" text-anchor="middle"><tspan font-size="46" font-weight="600" fill="#f0f2f5">100</tspan><tspan font-size="14" fill="#8a93a6" dx="4">ml</tspan></text>
+<text x="120" y="154" text-anchor="middle" font-size="12" letter-spacing="2" fill="#8a93a6">SPARKLING</text>
+</g>
+
+<!-- 500 ml -->
+<g transform="translate(310,76)">
+<text x="120" y="-14" text-anchor="middle" font-size="14" font-weight="600" fill="#f0f2f5">500 ml</text>
+<circle cx="120" cy="120" r="116" fill="none" stroke="url(#ebezel)" stroke-width="6"/>
+<circle cx="120" cy="120" r="108" fill="#101418"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#2a3038" stroke-width="10"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#35a7e0" stroke-width="10" stroke-linecap="round"
+  stroke-dasharray="133.6 501.0" transform="rotate(-90 120 120)"/>
+<text x="120" y="121" text-anchor="middle"><tspan font-size="46" font-weight="600" fill="#f0f2f5">500</tspan><tspan font-size="14" fill="#8a93a6" dx="4">ml</tspan></text>
+<text x="120" y="154" text-anchor="middle" font-size="12" letter-spacing="2" fill="#8a93a6">SPARKLING</text>
+</g>
+
+<!-- 1200 ml -->
+<g transform="translate(600,76)">
+<text x="120" y="-14" text-anchor="middle" font-size="14" font-weight="600" fill="#f0f2f5">1200 ml</text>
+<circle cx="120" cy="120" r="116" fill="none" stroke="url(#ebezel)" stroke-width="6"/>
+<circle cx="120" cy="120" r="108" fill="#101418"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#2a3038" stroke-width="10"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#35a7e0" stroke-width="10" stroke-linecap="round"
+  stroke-dasharray="367.4 267.2" transform="rotate(-90 120 120)"/>
+<text x="120" y="121" text-anchor="middle"><tspan font-size="46" font-weight="600" fill="#f0f2f5">1200</tspan><tspan font-size="14" fill="#8a93a6" dx="4">ml</tspan></text>
+<text x="120" y="154" text-anchor="middle" font-size="12" letter-spacing="2" fill="#8a93a6">SPARKLING</text>
+</g>
+
+<!-- 2000 ml -->
+<g transform="translate(890,76)">
+<text x="120" y="-14" text-anchor="middle" font-size="14" font-weight="600" fill="#f0f2f5">2000 ml (maximum)</text>
+<circle cx="120" cy="120" r="116" fill="none" stroke="url(#ebezel)" stroke-width="6"/>
+<circle cx="120" cy="120" r="108" fill="#101418"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#2a3038" stroke-width="10"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#35a7e0" stroke-width="10" stroke-linecap="round"
+  stroke-dasharray="634.6 0.1" transform="rotate(-90 120 120)"/>
+<text x="120" y="121" text-anchor="middle"><tspan font-size="46" font-weight="600" fill="#f0f2f5">2000</tspan><tspan font-size="14" fill="#8a93a6" dx="4">ml</tspan></text>
+<text x="120" y="154" text-anchor="middle" font-size="12" letter-spacing="2" fill="#8a93a6">SPARKLING</text>
+</g>
+</svg>

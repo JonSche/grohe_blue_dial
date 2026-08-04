@@ -41,10 +41,16 @@ components/
                EncoderEvents (RotateCW/RotateCCW/ShortPress/LongPress) --
                no LVGL dependency, no knowledge of what the events mean.
   ui/          UiManager: the LVGL screen/widget tree for the dial screen
-               (progress ring, amount, water type, hint). Takes an
-               lv_display_t* and a DialState to render from -- no knowledge
-               of SPI, GPIO, esp_lcd, or the encoder. Contains no business
-               logic: Render() is a pure function of DialState.
+               (progress ring, amount/checkmark, water type, hint, two tiny
+               connectivity glyphs, a travelling highlight during
+               Dispensing). Takes an lv_display_t* and a DialState to
+               render from -- no knowledge of SPI, GPIO, esp_lcd, or the
+               encoder. Contains no business logic: for any given
+               DialState, Render() always produces the same widget
+               content/visibility (M11's small set of LVGL animations are
+               started/stopped on state *edges* Render() detects via its
+               own last-rendered-state bookkeeping, not business logic of
+               their own -- see ui_manager.cpp's own comments).
   grohe_ble/   BleManager owns the NimBLE host stack lifecycle and the BLE
                connection state machine (Idle/Initializing/Scanning/
                Connecting/Discovering/Ready/Disconnected/Backoff -- only
@@ -193,6 +199,89 @@ what the original single-partition table had before the Wi-Fi addition,
 just doubled up safely. See `partitions.csv`'s own comment for the exact
 sizing arithmetic.
 
+## Dispense UI (M11)
+
+Implements `docs/ui/dispense_animation_mockups.md` (the frozen UI spec)
+faithfully; the spec, not this section, is the source of truth for *why*
+any of this looks the way it does. This section only records the handful
+of implementation-level decisions the spec's illustrative mockups didn't
+(and couldn't) pin down, plus one deliberate, documented simplification.
+
+- **BLE readiness is observed twice, deliberately, rather than exposed by
+  `GroheClient`.** `dial_state::ConnectionStatus` needs the same
+  `ready_for_protocol_ && subscribed_` condition `GroheClient` already
+  gates protocol writes on internally, but this milestone's scope excludes
+  changing `GroheClient`/`BleManager`. Since `kReadyForProtocol` and
+  `kSubscribed` are already public `BleEvent`s flowing through
+  `GroheClient::Poll()`, `DialController` now tracks the same two flags a
+  second time, purely for display (`HandleReadyForProtocol()`/
+  `HandleSubscribed()`, see dial_controller.cpp). Both observations are
+  driven by the same underlying NimBLE callbacks, so they cannot disagree
+  in practice; if `GroheClient` ever grows a public readiness accessor,
+  this duplication should be the first thing removed.
+- **"Time Sync" vs. "No Time" is a UI-only timeout, not a firmware
+  concept.** `TimeProvider`/`SntpTimeProvider` have no notion of "gave up"
+  — SNTP either resolves or the Wi-Fi/SNTP window (M9) hasn't completed
+  yet. `DialController::kTimeSyncTimeoutUs` (15 s, a generous multiple of
+  that window) is the judgement call that turns one boolean
+  (`HasValidTime()`) into the three-way `dial_state::TimeStatus` the
+  frozen spec's state machine calls for. Documented here because it's the
+  one number in this milestone with no basis in a measurement — it's a
+  reasonable default, not a validated threshold.
+- **Water-type de-emphasis is opacity-only, not a smaller font.** The
+  frozen spec's mockups illustrate it as "smaller and/or lower contrast";
+  this build only compiles Montserrat 14/28/48 (`sdkconfig`), so there is
+  no smaller size between the label's existing 14 px and nothing. Opacity
+  alone (100% → ~50%) satisfies the spec's own "and/or" wording without
+  enabling a new font size.
+- **The Stopping/Finished screen-wide text transitions are immediate
+  swaps, not the timed cross-fades in the spec's motion table.** A
+  literal 250–300 ms fade would require fading out several independently-
+  changing labels, swapping their content, then fading back in — real
+  animation-sequencing complexity for a transition that happens once per
+  dispense and completes within a single `Render()` call either way. This
+  is the one place this implementation's behaviour differs from the
+  frozen spec rather than just filling in an unspecified detail; revisit
+  if a future pass wants the literal fade.
+- **`DispenseSession` gained one accessor, `DurationUs()`, and nothing
+  else.** The timing model itself (`Start()`/`Stop()`/`Finished()`/
+  `Remaining()`) is unchanged; `DurationUs()` exposes what the class
+  already computes internally so `DialController::Tick()` can derive
+  `delivered_ml = active_dispense_amount_ml * elapsed / duration` without
+  `DispenseSession` needing to know about millilitres at all — exactly the
+  extension point its own pre-M11 comment anticipated ("a future progress
+  indicator... only ever touches this class").
+
+## Status text polish (M11.1)
+
+M11's screen carried two independent status lines: `hint_label_` (the
+connection/time/dispense priority ladder) and a second, separate
+`appliance_status_label_` showing the appliance's raw protocol response
+code (`"APPL OK"` / `"APPL INVALID_HMAC"` / `"APPL CODE 7"` — internal
+codes useful during M6–M9's reverse-engineering, never meant for a
+production UI). M11.1 removes `appliance_status_label_` entirely (the
+widget, its `Init()`, its `Render()` branch — dead code once nothing
+displays it, not left invisible) and consolidates everything into
+`hint_label_`'s own ladder. `DialController::HandleApplianceState()`
+itself is unchanged — the decoded response still flows into
+`dial_state::DialState`'s `appliance_response_*` fields, since that's data
+capture, not UI; it's now logged (`ESP_LOGI`/`ESP_LOGW`) rather than
+displayed, satisfying "those belong in logs, not in the UI" without
+touching `GroheProtocol` or the fields themselves.
+
+The new ladder is a genuine content rewrite, not just APPL-text removal —
+confirmed by the fact that `TimeStatus::kSyncing` and `kUnavailable` (
+previously "SYNCHRONISING..." vs. "TIME UNAVAILABLE", two different
+messages) now both read "Synchronising..." : neither state is something
+the user can act on differently, so showing a distinct "you're offline for
+real" message for `kUnavailable` was more alarming than informative. Ready
++ Idle now shows no text at all (previously "PRESS TO POUR") — the ring
+alone communicates readiness. Casing follows the milestone's own spec
+verbatim: "PRESS TO STOP" (Dispensing) stays upper-case; every other
+message is sentence case. `dial_state::TimeStatus` itself (the enum, and
+`DialController`'s existing `kTimeSyncTimeoutUs` threshold logic) is
+unchanged — only its two states' rendered text converged.
+
 ## Why GPIO-ISR (not PCNT) for the encoder
 
 The rotary encoder is decoded in software via GPIO edge interrupts, not the
@@ -236,8 +325,9 @@ peripheral, so a generic reusable BLE layer is premature abstraction.
   below. As of M7, it also accepts a GATT write via `WriteCharacteristic()`
   (see "Sending commands" below) — M8 reuses this same method unchanged
   for a real dispense, exactly as it did for the M7 `stop()` probe. `Ready`
-  and `Backoff` remain unimplemented — no further protocol handling or
-  reconnect logic yet.
+  remains unimplemented (protocol-level readiness distinct from GATT
+  readiness). `Backoff` is implemented as of M11.1 — see "Automatic
+  reconnect (M11.1)" below.
 - **`ble_constants.hpp`** holds the BLE protocol constants: the Grohe
   service UUID (M4) and, as of M6, the read/write characteristic UUIDs.
   Every one of these appears exactly once in the codebase, so the protocol
@@ -345,6 +435,63 @@ not a transport failure, and not disconnected on: `GroheProtocol` logs it
 as hex and the connection stays up, since this milestone deliberately does
 not yet interpret every possible payload shape.
 
+**Automatic reconnect (M11.1):** every failure path in this class already
+funneled through `FailConnection()` — connect timeout/failure, a
+discovery-level GATT error, subscribe failure, or an unexpected
+disconnect. M11.1 gives that one choke point a retry: it now also drains
+`command_queue_` (see below) and calls `ScheduleReconnect()`, which enters
+`BleState::kBackoff` and arms a one-shot `esp_timer` for
+`kBackoffDelaysMs[backoff_index_]` — 1 s → 2 s → 5 s → 5 s → ... (clamped
+at the array's last entry, never growing further), reset to the first
+delay the moment `DiscoverNextServiceChrs()` reaches `kReadyForProtocol`
+(this class's own pre-existing definition of "a successful connection").
+The timer callback runs on the esp_timer task, not the host task, so it
+does nothing but post a second `ble_npl_event` (`reconnect_event_`,
+shaped identically to `command_event_`) onto NimBLE's own default event
+queue — the exact same cross-task hand-off `WriteCharacteristic()` already
+uses, preserving "every NimBLE call happens on the host task" with zero
+new exceptions. Once that event fires, `HandleReconnectEvent()` calls
+`StartScan()` again — the same entry point the very first connection
+used, not a second, parallel connection path — guarded by `state_ ==
+kBackoff` so a stray/late timer fire after the state already moved on for
+an unrelated reason (e.g. a host reset landed mid-wait and `OnHostSync()`
+already restarted scanning on its own) is a safe no-op. A host-level reset
+(`OnHostReset()`/`OnHostSync()`) is untouched by this — it already has its
+own working recovery path (NimBLE re-invokes `sync_cb` after a resync),
+and none of the milestone's test scenarios (appliance power-cycled,
+Bluetooth toggled, walked out of range) are host resets. There is no
+attempt limit: reconnect retries indefinitely, since "the appliance is
+powered off" and "still out of range" both look identical to an ordinary
+scan that just hasn't found anything yet.
+
+This closes a race this class's own pre-M11.1 comment had already
+identified as latent: a `BleWriteCommand` carries only a value handle, not
+a connection identity, so a write still queued when a connection failed
+could — once something reconnects and hands out a numeric `conn_handle_`
+that happens to match — be issued against the wrong peer.
+`FailConnection()` now discards `command_queue_` unconditionally before
+scheduling a retry, so every reconnect starts with an empty queue, the
+same as any fresh connection.
+
+`app::DialController`/`ui::UiManager` needed no protocol-level changes for
+this: `dial_state::ConnectionStatus` already transitions
+`kConnectionLost → kReady` purely from `BleManager` re-emitting
+`kReadyForProtocol`/`kSubscribed` after a successful reconnect, via
+entirely pre-existing M11 logic. The one gap was the milestone's own "a
+short visible indication (~1 second)" requirement — left alone,
+`connection_status` would sit at `kConnectionLost` for the *entire* retry
+duration, however long BleManager's own backoff takes, never reading
+"Connecting..." until the moment it was already nearly back. `DialController`
+gained a small, purely cosmetic `connection_lost_until_us_` hold (same
+shape as the pre-existing `finished_until_us_`): `HandleConnectionLost()`
+(re)arms it on every `kConnectionFailed` event, including a retry-attempt
+failure that arrives after the dial had already moved on to
+"Connecting..."; `Tick()` flips `connection_status` to `kConnecting` once
+it elapses. This dial-side ~1 s hold is intentionally decoupled from
+BleManager's own (much longer, backing-off) retry loop — it only decides
+how long the *acknowledgement* is shown, not how long the underlying
+retry actually takes.
+
 **Sending commands** (M7 introduced the mechanism; M8 uses it for real):
 M6's own hardware validation, cross-checked against the Python reference's
 `client.py` (its `_connect()` never issues a GATT read — only
@@ -415,7 +562,29 @@ amountMl:taste:base64(hmac)`, `protocol.py`'s `create_request()` — just
 with real `amount_ml`/`taste` instead of `0`/`0`; `BuildDispensePayload()`
 is the one path both go through (`BuildStopPayload()` is now a thin
 wrapper calling it with `0`/`WaterType::kUnknown`), so there is no second,
-duplicated serialization to keep in sync.
+duplicated serialization to keep in sync. `taste` is written as a plain
+`static_cast<int>(WaterType)` — `BuildDispensePayload()` has no per-value
+switch or validation, so it already accepts every `WaterType` enumerator
+equally; adding a new water type (M10) is purely a `dial_state`/
+`DialController` change, not a `grohe_ble` one.
+
+**Water types** (`grohe_ble::WaterType`, `constants.py`'s `WaterType`
+`IntEnum`): `kUnknown = 0`, `kStill = 1`, `kMedium = 2`, `kSparkling = 3`,
+`kHot = 4`, `kHotMixed = 5` — confirmed at the same ⭐⭐⭐⭐⭐ confidence as
+the characteristic UUIDs and response codes (`grohe_blue_ble/docs/
+EVIDENCE.md`'s "Water Types" table), sourced from the Android
+application's own decompiled enums, not inferred from traffic. `kStill`/
+`kSparkling` have been hardware-dispensed since M8; `kMedium` (M10) uses
+the identical, already-proven payload/HMAC path, so nothing about
+*sending* it is new — only that the dial now offers it as a third
+selectable state. `kHot`/`kHotMixed` are out of scope: this appliance
+model has no hot-water outlet, so there is nothing to select them for
+(not a missing-evidence gap, just not applicable to Grohe Blue Home).
+`dial_state::WaterType` deliberately only mirrors the three the dial
+actually offers (`kStill`/`kMedium`/`kSparkling`, ordered to match the
+long-press cycle) — `app::ToGroheWaterType()` remains the one place that
+translates between the two enums, unchanged in shape since M8, just with
+one more case.
 
 *Disambiguating acknowledgements*: the response format carries no marker
 of which command it answers, but `GroheClient` needs to know specifically

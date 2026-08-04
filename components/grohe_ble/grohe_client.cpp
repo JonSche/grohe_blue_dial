@@ -35,9 +35,9 @@ void GroheClient::Poll(const std::function<void(const BleEvent&)>& on_event) {
         subscribed_ = true;
         break;
       case BleEventType::kConnectionFailed:
-        // A fresh connection (if a future milestone adds reconnect) starts
-        // this sequence over -- see the members' own comment in
-        // grohe_client.hpp.
+        // A fresh connection -- BleManager retries automatically as of
+        // M11.1 -- starts this sequence over -- see the members' own
+        // comment in grohe_client.hpp.
         ready_for_protocol_ = false;
         subscribed_ = false;
         pending_command_ = PendingCommand::kNone;

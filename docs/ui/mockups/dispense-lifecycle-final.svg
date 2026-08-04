@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 2600 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Final dispense lifecycle, production spec: the ring never changes at all">
+<defs>
+<style>text{font-family:'Montserrat','Helvetica Neue',Arial,sans-serif;}</style>
+<linearGradient id="fbezel" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0" stop-color="#5a5f66"/><stop offset="0.3" stop-color="#c9ced4"/>
+<stop offset="0.55" stop-color="#8b9199"/><stop offset="1" stop-color="#33363b"/>
+</linearGradient>
+<marker id="farrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#5a6472"/>
+</marker>
+</defs>
+<rect width="2600" height="320" fill="#0b0d10"/>
+<line x1="265" y1="184" x2="305" y2="184" stroke="#5a6472" stroke-width="2" marker-end="url(#farrow)"/>
+<line x1="555" y1="184" x2="595" y2="184" stroke="#5a6472" stroke-width="2" marker-end="url(#farrow)"/>
+<line x1="845" y1="184" x2="885" y2="184" stroke="#5a6472" stroke-width="2" marker-end="url(#farrow)"/>
+<line x1="1135" y1="184" x2="1175" y2="184" stroke="#5a6472" stroke-width="2" marker-end="url(#farrow)"/>
+<line x1="1425" y1="184" x2="1465" y2="184" stroke="#5a6472" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#farrow)"/>
+<line x1="1715" y1="184" x2="1755" y2="184" stroke="#5a6472" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#farrow)"/>
+
+<!-- F1 Connecting -->
+<g transform="translate(20,64)">
+<text x="120" y="-30" text-anchor="middle" font-size="14" font-weight="600" fill="#f0f2f5">Connecting</text>
+<text x="120" y="-14" text-anchor="middle" font-size="10" fill="#8a93a6">ring static — only the glyph moves</text>
+<circle cx="120" cy="120" r="116" fill="none" stroke="url(#fbezel)" stroke-width="6"/>
+<circle cx="120" cy="120" r="108" fill="#101418"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#2a3038" stroke-width="10"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#6b8494" stroke-width="10" stroke-linecap="round"
+  stroke-dasharray="133.6 501.0" transform="rotate(-90 120 120)"/>
+<circle cx="108" cy="52" r="6" fill="none" stroke="#8a93a6" stroke-width="2" stroke-opacity="0.35"/>
+<circle cx="132" cy="52" r="8" fill="#35a7e0" fill-opacity="0.15"/>
+<circle cx="132" cy="52" r="4" fill="#35a7e0" fill-opacity="0.65"/>
+<text x="120" y="121" text-anchor="middle"><tspan font-size="46" font-weight="600" fill="#f0f2f5">500</tspan><tspan font-size="14" fill="#8a93a6" dx="4">ml</tspan></text>
+<text x="120" y="154" text-anchor="middle" font-size="12" letter-spacing="2" fill="#8a93a6">SPARKLING</text>
+<text x="120" y="186" text-anchor="middle" font-size="13" fill="#8a93a6">CONNECTING…</text>
+</g>
+
+<!-- F2 Time Sync -->
+<g transform="translate(310,64)">
+<text x="120" y="-30" text-anchor="middle" font-size="14" font-weight="600" fill="#f0f2f5">Time Sync</text>
+<text x="120" y="-14" text-anchor="middle" font-size="10" fill="#8a93a6">ring static — only the glyph moves</text>
+<circle cx="120" cy="120" r="116" fill="none" stroke="url(#fbezel)" stroke-width="6"/>
+<circle cx="120" cy="120" r="108" fill="#101418"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#2a3038" stroke-width="10"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#6b8494" stroke-width="10" stroke-linecap="round"
+  stroke-dasharray="133.6 501.0" transform="rotate(-90 120 120)"/>
+<circle cx="108" cy="52" r="6" fill="none" stroke="#2a3038" stroke-width="2"/>
+<circle cx="108" cy="52" r="6" fill="none" stroke="#35a7e0" stroke-width="2" stroke-linecap="round" stroke-dasharray="15.8 21.9" transform="rotate(-40 108 52)"/>
+<circle cx="132" cy="52" r="4.5" fill="#35a7e0"/>
+<text x="120" y="121" text-anchor="middle"><tspan font-size="46" font-weight="600" fill="#f0f2f5">500</tspan><tspan font-size="14" fill="#8a93a6" dx="4">ml</tspan></text>
+<text x="120" y="154" text-anchor="middle" font-size="12" letter-spacing="2" fill="#8a93a6">SPARKLING</text>
+<text x="120" y="186" text-anchor="middle" font-size="13" fill="#8a93a6">SYNCHRONISING…</text>
+</g>
+
+<!-- F3 Ready -->
+<g transform="translate(600,64)">
+<text x="120" y="-30" text-anchor="middle" font-size="14" font-weight="600" fill="#f0f2f5">Ready</text>
+<text x="120" y="-14" text-anchor="middle" font-size="10" fill="#8a93a6">ring = 500 ml — this exact arc never changes again</text>
+<circle cx="120" cy="120" r="116" fill="none" stroke="url(#fbezel)" stroke-width="6"/>
+<circle cx="120" cy="120" r="108" fill="#101418"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#2a3038" stroke-width="10"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#35a7e0" stroke-width="10" stroke-linecap="round"
+  stroke-dasharray="133.6 501.0" transform="rotate(-90 120 120)"/>
+<circle cx="108" cy="52" r="4" fill="#35a7e0"/>
+<circle cx="132" cy="52" r="4.5" fill="#35a7e0"/>
+<text x="120" y="121" text-anchor="middle"><tspan font-size="46" font-weight="600" fill="#f0f2f5">500</tspan><tspan font-size="14" fill="#8a93a6" dx="4">ml</tspan></text>
+<text x="120" y="154" text-anchor="middle" font-size="12" letter-spacing="2" fill="#8a93a6">SPARKLING</text>
+<text x="120" y="186" text-anchor="middle" font-size="13" fill="#8a93a6">PRESS TO POUR</text>
+</g>
+
+<!-- F4 Dispensing - start pulse -->
+<g transform="translate(890,64)">
+<text x="120" y="-30" text-anchor="middle" font-size="14" font-weight="600" fill="#f0f2f5">Dispensing — start</text>
+<text x="120" y="-14" text-anchor="middle" font-size="10" fill="#8a93a6">150–200 ms pulse — same arc as Ready</text>
+<circle cx="120" cy="120" r="116" fill="none" stroke="url(#fbezel)" stroke-width="6"/>
+<circle cx="120" cy="120" r="108" fill="#101418"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#2a3038" stroke-width="10"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#7fd0f2" stroke-width="11" stroke-linecap="round"
+  stroke-dasharray="133.6 501.0" transform="rotate(-90 120 120)"/>
+<circle cx="108" cy="52" r="4" fill="#35a7e0"/>
+<circle cx="132" cy="52" r="4.5" fill="#35a7e0"/>
+<text x="120" y="121" text-anchor="middle"><tspan font-size="46" font-weight="600" fill="#f0f2f5">0</tspan><tspan font-size="14" fill="#8a93a6" dx="4">ml</tspan></text>
+<text x="120" y="154" text-anchor="middle" font-size="10.5" letter-spacing="2" fill="#8a93a6" fill-opacity="0.5">SPARKLING</text>
+<text x="120" y="186" text-anchor="middle" font-size="13" fill="#f0f2f5">PRESS TO STOP</text>
+</g>
+
+<!-- F5 Dispensing - mid -->
+<g transform="translate(1180,64)">
+<text x="120" y="-30" text-anchor="middle" font-size="14" font-weight="600" fill="#f0f2f5">Dispensing — in progress</text>
+<text x="120" y="-14" text-anchor="middle" font-size="10" fill="#8a93a6">t = 12.0 s — ring identical to Ready; only the highlight travels</text>
+<circle cx="120" cy="120" r="116" fill="none" stroke="url(#fbezel)" stroke-width="6"/>
+<circle cx="120" cy="120" r="108" fill="#101418"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#2a3038" stroke-width="10"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#35a7e0" stroke-width="10" stroke-linecap="round"
+  stroke-dasharray="133.6 501.0" transform="rotate(-90 120 120)"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#7fd0f2" stroke-width="10" stroke-linecap="round"
+  stroke-dasharray="17.63 616.97" transform="rotate(-30 120 120)"/>
+<circle cx="108" cy="52" r="4" fill="#35a7e0"/>
+<circle cx="132" cy="52" r="4.5" fill="#35a7e0"/>
+<text x="120" y="121" text-anchor="middle"><tspan font-size="46" font-weight="600" fill="#f0f2f5">280</tspan><tspan font-size="14" fill="#8a93a6" dx="4">ml</tspan></text>
+<text x="120" y="154" text-anchor="middle" font-size="10.5" letter-spacing="2" fill="#8a93a6" fill-opacity="0.5">SPARKLING</text>
+<text x="120" y="186" text-anchor="middle" font-size="13" fill="#f0f2f5">PRESS TO STOP</text>
+</g>
+
+<!-- F6 Stopping -->
+<g transform="translate(1470,64)">
+<text x="120" y="-30" text-anchor="middle" font-size="14" font-weight="600" fill="#f0f2f5">Stopping</text>
+<text x="120" y="-14" text-anchor="middle" font-size="10" fill="#8a93a6">branch of Dispensing — highlight halts, ring unchanged</text>
+<circle cx="120" cy="120" r="116" fill="none" stroke="url(#fbezel)" stroke-width="6"/>
+<circle cx="120" cy="120" r="108" fill="#101418"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#2a3038" stroke-width="10"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#35a7e0" stroke-width="10" stroke-linecap="round"
+  stroke-dasharray="133.6 501.0" transform="rotate(-90 120 120)"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#7fd0f2" stroke-width="10" stroke-linecap="round" stroke-opacity="0.7"
+  stroke-dasharray="17.63 616.97" transform="rotate(-30 120 120)"/>
+<circle cx="108" cy="52" r="4" fill="#35a7e0"/>
+<circle cx="132" cy="52" r="4.5" fill="#35a7e0"/>
+<text x="120" y="121" text-anchor="middle"><tspan font-size="46" font-weight="600" fill="#f0f2f5">280</tspan><tspan font-size="14" fill="#8a93a6" dx="4">ml</tspan></text>
+<text x="120" y="154" text-anchor="middle" font-size="10.5" letter-spacing="2" fill="#8a93a6" fill-opacity="0.5">SPARKLING</text>
+<text x="120" y="186" text-anchor="middle" font-size="13" fill="#f0f2f5">STOPPING…</text>
+</g>
+
+<!-- F7 Finished -->
+<g transform="translate(1760,64)">
+<text x="120" y="-30" text-anchor="middle" font-size="14" font-weight="600" fill="#f0f2f5">Finished</text>
+<text x="120" y="-14" text-anchor="middle" font-size="10" fill="#8a93a6">branch of Dispensing — ring still unchanged, highlight gone</text>
+<circle cx="120" cy="120" r="116" fill="none" stroke="url(#fbezel)" stroke-width="6"/>
+<circle cx="120" cy="120" r="108" fill="#101418"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#2a3038" stroke-width="10"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#35a7e0" stroke-width="10" stroke-linecap="round"
+  stroke-dasharray="133.6 501.0" transform="rotate(-90 120 120)"/>
+<circle cx="108" cy="52" r="4" fill="#35a7e0"/>
+<circle cx="132" cy="52" r="4.5" fill="#35a7e0"/>
+<path d="M96,122 l16,16 l34,-38" fill="none" stroke="#35a7e0" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="120" y="154" text-anchor="middle" font-size="12" letter-spacing="2" fill="#8a93a6">SPARKLING</text>
+</g>
+
+<!-- F8 Connection Lost -->
+<g transform="translate(2050,64)">
+<text x="120" y="-30" text-anchor="middle" font-size="14" font-weight="600" fill="#f0f2f5">Connection Lost</text>
+<text x="120" y="-14" text-anchor="middle" font-size="10" fill="#8a93a6">branch of Ready</text>
+<circle cx="120" cy="120" r="116" fill="none" stroke="url(#fbezel)" stroke-width="6"/>
+<circle cx="120" cy="120" r="108" fill="#101418"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#2a3038" stroke-width="10"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#6b8494" stroke-width="10" stroke-linecap="round"
+  stroke-dasharray="133.6 501.0" transform="rotate(-90 120 120)"/>
+<circle cx="108" cy="52" r="4" fill="#35a7e0"/>
+<circle cx="132" cy="52" r="5" fill="none" stroke="#8a93a6" stroke-width="2" stroke-opacity="0.25"/>
+<text x="120" y="121" text-anchor="middle"><tspan font-size="46" font-weight="600" fill="#f0f2f5">500</tspan><tspan font-size="14" fill="#8a93a6" dx="4">ml</tspan></text>
+<text x="120" y="154" text-anchor="middle" font-size="12" letter-spacing="2" fill="#8a93a6">SPARKLING</text>
+<text x="120" y="186" text-anchor="middle" font-size="13" fill="#8a93a6">CONNECTION LOST</text>
+</g>
+
+<!-- F9 No Time -->
+<g transform="translate(2340,64)">
+<text x="120" y="-30" text-anchor="middle" font-size="14" font-weight="600" fill="#f0f2f5">No Time</text>
+<text x="120" y="-14" text-anchor="middle" font-size="10" fill="#8a93a6">branch of Time Sync</text>
+<circle cx="120" cy="120" r="116" fill="none" stroke="url(#fbezel)" stroke-width="6"/>
+<circle cx="120" cy="120" r="108" fill="#101418"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#2a3038" stroke-width="10"/>
+<circle cx="120" cy="120" r="101" fill="none" stroke="#6b8494" stroke-width="10" stroke-linecap="round"
+  stroke-dasharray="133.6 501.0" transform="rotate(-90 120 120)"/>
+<circle cx="108" cy="52" r="6" fill="none" stroke="#8a93a6" stroke-width="2" stroke-opacity="0.35"/>
+<circle cx="132" cy="52" r="4.5" fill="#35a7e0"/>
+<text x="120" y="121" text-anchor="middle"><tspan font-size="46" font-weight="600" fill="#f0f2f5">500</tspan><tspan font-size="14" fill="#8a93a6" dx="4">ml</tspan></text>
+<text x="120" y="154" text-anchor="middle" font-size="12" letter-spacing="2" fill="#8a93a6">SPARKLING</text>
+<text x="120" y="186" text-anchor="middle" font-size="13" fill="#8a93a6">TIME UNAVAILABLE</text>
+</g>
+</svg>

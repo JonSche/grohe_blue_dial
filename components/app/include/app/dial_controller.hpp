@@ -43,16 +43,20 @@ class DialController {
  public:
   // Idle: short press -> kRequestDispense (unless a command is already in
   // flight -- see command_pending_'s own comment). Dispensing: short press
-  // -> kRequestStop. Long press toggles water type, but only while idle
-  // (meaningless mid-dispense). Rotation always adjusts amount_ml
-  // regardless of status -- harmless, only affects the *next* dispense.
+  // -> kRequestStop. Long press cycles water type (M10: Still -> Medium ->
+  // Sparkling -> Still), but only while idle (meaningless mid-dispense).
+  // Rotation always adjusts amount_ml regardless of status -- harmless,
+  // only affects the *next* dispense.
   [[nodiscard]] DialAction HandleEvent(encoder::EncoderEvent event);
 
   // Called by App right after it attempts to actually send the command
   // HandleEvent() requested; `accepted` is whatever
   // GroheClient::RequestDispense()/RequestStop() returned. Marks a command
   // as in flight only if it was actually accepted, so a rejected request
-  // doesn't block the very next press.
+  // doesn't block the very next press. If a stop request failed to send
+  // (accepted == false), also reverts HandleEvent()'s optimistic kStopping
+  // back to kDispensing -- otherwise nothing would ever revert it, since no
+  // outcome is coming for a command that was never sent.
   void HandleCommandSent(bool accepted);
 
   // The only place a completed command is interpreted: a successful
@@ -66,20 +70,43 @@ class DialController {
       const grohe_ble::CommandOutcome& outcome);
 
   // Called every App::Run() iteration: returns to Idle once
-  // dispense_session_ reports the predicted duration has elapsed. Returns
-  // whether anything changed.
+  // dispense_session_ reports the predicted duration has elapsed. Also the
+  // forward-progress fallback for kStopping -- if dispense_session_
+  // finishes naturally before a pending stop's acknowledgement ever
+  // arrives, this treats it the same as a normal completion rather than
+  // leaving the dial stuck on "STOPPING...". (M11.1) Also flips
+  // connection_status from kConnectionLost to kConnecting once
+  // connection_lost_until_us_ elapses -- BleManager keeps retrying in the
+  // background the whole time (see its own backoff schedule); this is
+  // purely how long the dial keeps showing "Connection lost" before
+  // switching to "Connecting..." for the remainder of that retry.
+  // Returns whether anything changed.
   [[nodiscard]] bool Tick();
 
   // Called on BleEventType::kConnectionFailed: forces a return to Idle and
   // clears in-flight state, satisfying "disconnect during dispense" from
-  // this milestone's error-handling requirements. Returns whether anything
-  // changed.
+  // M8's error-handling requirements, and (M11) sets connection_status to
+  // kConnectionLost. Also clears the ble_ready_for_protocol_/ble_subscribed_
+  // flags below, so a subsequent reconnect re-earns kReady from scratch
+  // rather than starting from stale flags. (M11.1) Also (re)starts the
+  // brief connection_lost_until_us_ hold -- see Tick()'s own comment for
+  // why this is what actually produces "Connection lost, then
+  // Connecting..." rather than "Connection lost" for the whole retry.
+  // Returns whether anything changed.
   [[nodiscard]] bool HandleConnectionLost();
+
+  // Called on BleEventType::kReadyForProtocol / kSubscribed respectively
+  // (M11) -- see connection_status's own comment on dial_state.hpp for why
+  // DialController tracks these two flags itself instead of GroheClient
+  // exposing them. Returns whether anything changed.
+  [[nodiscard]] bool HandleReadyForProtocol();
+  [[nodiscard]] bool HandleSubscribed();
 
   // Translates the appliance's decoded protocol response into DialState's
   // own plain fields -- dial_state has no dependency on grohe_ble (see
-  // dial_state.hpp), so this is the one place that bridges the two. Purely
-  // diagnostic display (the "APPL ..." status label) -- independent of the
+  // dial_state.hpp), so this is the one place that bridges the two. As of
+  // M11.1 this data is log-only (ESP_LOGx, see the .cpp): the UI no longer
+  // has a status label for raw response codes -- independent of the
   // command-outcome path above, which is what actually drives the
   // Idle/Dispensing state machine. Returns true if anything actually
   // changed.
@@ -116,6 +143,42 @@ class DialController {
   // detect "is this actually new" with a single comparison instead of
   // diffing every field.
   uint32_t last_seen_sequence_ = 0;
+
+  // M11: the two independent gate conditions GroheClient itself uses to
+  // decide "ready for protocol writes" (see grohe_client.hpp's
+  // ready_for_protocol_/subscribed_), observed here a second time purely
+  // for display -- see dial_state.hpp's ConnectionStatus comment for why
+  // this doesn't require changing GroheClient. Recomputed into
+  // state_.connection_status by UpdateConnectionStatus() below whenever
+  // either flag changes; both reset on HandleConnectionLost() so a
+  // subsequent reconnect re-earns kReady from scratch.
+  bool ble_ready_for_protocol_ = false;
+  bool ble_subscribed_ = false;
+  // Recomputes state_.connection_status from the two flags above; returns
+  // whether it actually changed (so HandleReadyForProtocol()/
+  // HandleSubscribed() don't force a redundant re-render when only one of
+  // the two flags has flipped so far).
+  bool UpdateConnectionStatus();
+
+  // esp_timer_get_time() at the moment connection_status most recently
+  // became kReady -- the baseline HandleTimeStatus() measures against to
+  // decide "still syncing" vs. "no time" (see TimeStatus's own comment).
+  int64_t connected_since_us_ = 0;
+
+  // esp_timer_get_time() deadline for how long the Finished checkmark
+  // (dial_state::DispenseStatus::kFinished) stays on screen before Tick()
+  // returns to kIdle -- a separate, purely-cosmetic timer from
+  // dispense_session_, which tracks the physical pour itself and is
+  // already stopped by the time this one starts.
+  int64_t finished_until_us_ = 0;
+
+  // M11.1: esp_timer_get_time() deadline for how long connection_status
+  // stays kConnectionLost before Tick() flips it to kConnecting -- purely
+  // cosmetic, same shape as finished_until_us_ above. (Re)set by every
+  // HandleConnectionLost() call, including a retry-attempt failure that
+  // arrives after the dial had already moved on to kConnecting -- see that
+  // method's own comment.
+  int64_t connection_lost_until_us_ = 0;
 };
 
 // Maps the UI-facing water type to the protocol's numeric taste value --

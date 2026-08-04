@@ -362,20 +362,45 @@ dependency this milestone introduces).
       timestamps; confirmed no temporary/hardcoded timestamp code
       remains anywhere in the diff.
 
-## M10 — Water Type Support
+## M10 — Water Type Support ✅
 
 Connection reliability (reconnect/backoff) and the dispense/UI experience
 were both delivered ahead of schedule, in M11/M11.1 — the one remaining
-functional gap on the appliance-control side is completing water-type
-support itself: still/sparkling has worked since M2, and **Medium** is
+functional gap on the appliance-control side was completing water-type
+support itself: still/sparkling has worked since M2, and **Medium** was
 the one remaining type to add.
 
-- [ ] Add **Medium** water as the third selectable water type.
-- [ ] Update the UI to support Still / Medium / Sparkling.
-- [ ] Extend the payload mapping (`WaterType`,
-      `ToGroheWaterType()`/`BuildDispensePayload()`) as required.
-- [ ] Validate on hardware.
-- [ ] Document the mapping in `ARCHITECTURE.md`.
+- [x] Added **Medium** as the third selectable water type --
+      `dial_state::WaterType` gains `kMedium`, ordered `kStill`/
+      `kMedium`/`kSparkling` to match the new long-press cycle.
+- [x] Long press now cycles Still → Medium → Sparkling → Still (was a
+      two-way toggle) — an explicit three-case switch in
+      `DialController::HandleEvent()`, not modular arithmetic, so a future
+      fourth type fails to compile here rather than cycling silently wrong.
+- [x] Updated the UI to support Still / Medium / Sparkling --
+      `dial_state::WaterTypeLabel()` gains a `"MEDIUM"` case; `UiManager`
+      itself needed no changes at all, since it already renders whatever
+      `WaterTypeLabel()` returns (no redesign, no new widget).
+- [x] Extended the payload mapping -- `grohe_ble::WaterType` already had
+      `kMedium = 2` (ported from the Python reference's `constants.py` in
+      an earlier milestone, never previously wired up to anything
+      selectable); `app::ToGroheWaterType()` remains the single
+      authoritative `dial_state::WaterType` ↔ `grohe_ble::WaterType`
+      mapping, gaining one more case. `BuildDispensePayload()` itself
+      needed no change: `taste` was already a plain
+      `static_cast<int>(WaterType)`, not a per-value switch.
+- [x] Documented the water-type evidence and mapping in
+      [ARCHITECTURE.md](ARCHITECTURE.md#ble-grohe_ble)'s "Water types"
+      section — confirmed at the same ⭐⭐⭐⭐⭐ confidence as the
+      characteristic UUIDs and response codes (Android application enum
+      decompilation, `grohe_blue_ble/docs/EVIDENCE.md`), not guessed.
+- [ ] **Not yet done from this environment: hardware validation** (dispense
+      Still, Medium, and Sparkling on the physical appliance; confirm no
+      regression to Still/Sparkling or to stop). No physical hardware
+      reachable here, same limitation M11/M11.1 ended on. Build verified
+      clean (`idf.py build`, no new warnings) and every `WaterType` switch
+      confirmed exhaustive (no `default:` label anywhere, so a missing
+      case would already have failed to build).
 
 ## M11 — Dispense UI Implementation ✅
 

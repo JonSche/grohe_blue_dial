@@ -6,7 +6,8 @@ namespace app {
 
 void DispenseSession::Start(int amount_ml, int64_t now_us) {
   const uint32_t duration_ms = grohe_ble::PredictDispenseDurationMs(amount_ml);
-  end_time_us_ = now_us + static_cast<int64_t>(duration_ms) * 1000;
+  duration_us_ = static_cast<int64_t>(duration_ms) * 1000;
+  end_time_us_ = now_us + duration_us_;
   active_ = true;
 }
 

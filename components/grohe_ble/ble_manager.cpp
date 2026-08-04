@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "grohe_ble/ble_constants.hpp"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
@@ -37,6 +38,14 @@ constexpr UBaseType_t kCharacteristicQueueDepth = 16;
 // precedent rather than the speculative multi-command load a future
 // control milestone might add.
 constexpr UBaseType_t kCommandQueueDepth = 2;
+
+// M11.1 reconnect backoff: "1s -> 2s -> 5s -> 5s -> ...", per the
+// milestone's own suggested schedule -- BleManager::ScheduleReconnect()
+// clamps backoff_index_ at the last entry rather than growing further, so
+// the delay never exceeds kBackoffDelaysMs[kNumBackoffDelays - 1].
+constexpr uint32_t kBackoffDelaysMs[] = {1000, 2000, 5000};
+constexpr size_t kNumBackoffDelays =
+    sizeof(kBackoffDelaysMs) / sizeof(kBackoffDelaysMs[0]);
 
 // The standard Client Characteristic Configuration Descriptor UUID
 // (0x2902), used to find where to write to enable notifications. This one
@@ -303,6 +312,21 @@ esp_err_t BleManager::Init() {
   // function already happens after nimble_port_init() for the same reason;
   // this one just wasn't obviously a NimBLE call by name.
   ble_npl_event_init(&command_event_, &BleManager::OnCommandEvent, this);
+  ble_npl_event_init(&reconnect_event_, &BleManager::OnReconnectEvent, this);
+
+  const esp_timer_create_args_t backoff_timer_args = {
+      .callback = &BleManager::OnBackoffTimer,
+      .arg = this,
+      .dispatch_method = ESP_TIMER_TASK,
+      .name = "ble_backoff",
+      .skip_unhandled_events = true,
+  };
+  err = esp_timer_create(&backoff_timer_args, &backoff_timer_);
+  if (err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_timer_create (backoff) failed: %s",
+             esp_err_to_name(err));
+    return err;
+  }
 
   ble_hs_cfg.reset_cb = &BleManager::OnHostReset;
   ble_hs_cfg.sync_cb = &BleManager::OnHostSync;
@@ -597,8 +621,8 @@ void BleManager::HandleDiscReport(const struct ble_gap_disc_desc& disc) {
 
   if (Connect() != ESP_OK) {
     // Connect() has already logged the specific failure and called
-    // FailConnection(), which returns the state machine to kDeviceFound --
-    // the address is still valid, ready for a future retry milestone.
+    // FailConnection(), which (M11.1) schedules its own retry -- nothing
+    // further to do here.
   }
 }
 
@@ -768,6 +792,13 @@ void BleManager::DiscoverNextServiceChrs() {
   if (next_svc_to_disc_ >= num_services_) {
     SetState(BleState::kReadyForProtocol);
     ESP_LOGI(kTag, "GATT discovery complete; ready for protocol");
+    // M11.1: this is this class's own definition of "a successful
+    // connection" -- every earlier point (GAP connect, MTU exchange,
+    // service discovery) could still be followed by a discovery-level
+    // failure, so resetting here (rather than e.g. in HandleConnect())
+    // means a connection that keeps failing partway through discovery
+    // keeps backing off instead of hammering retries at 1s forever.
+    backoff_index_ = 0;
     Enqueue(BleEvent{BleEventType::kReadyForProtocol});
     return;
   }
@@ -1125,6 +1156,16 @@ void BleManager::FailConnection(const char* what, int reason) {
   descriptor_search_started_ = false;
   subscribe_started_ = false;
 
+  // M11.1: discard anything still queued for the connection that just
+  // failed -- see command_queue_'s own comment. Whatever connection comes
+  // next (via ScheduleReconnect() below) starts with an empty queue, the
+  // same as any fresh connection.
+  if (command_queue_ != nullptr) {
+    BleWriteCommand discarded;
+    while (xQueueReceive(command_queue_, &discarded, 0) == pdTRUE) {
+    }
+  }
+
   // A connect-attempt failure -- whether it never left kDeviceFound (a
   // synchronous ble_hs_id_infer_auto()/ble_gap_connect() error inside
   // Connect(), before SetState(kConnecting) ever runs) or failed while
@@ -1139,6 +1180,76 @@ void BleManager::FailConnection(const char* what, int reason) {
   SetState(never_connected ? BleState::kDeviceFound
                            : BleState::kDisconnected);
   Enqueue(BleEvent{BleEventType::kConnectionFailed, reason});
+
+  // M11.1: recover automatically rather than sitting in kDeviceFound/
+  // kDisconnected forever -- the state SetState() just set above is
+  // superseded immediately by kBackoff. It stays useful for the log line
+  // SetState() itself prints (distinguishing "never got a connection" from
+  // "had one and lost it"), it's just not the last word on where the state
+  // machine ends up.
+  ScheduleReconnect();
+}
+
+void BleManager::ScheduleReconnect() {
+  const size_t index = backoff_index_ < kNumBackoffDelays
+                           ? backoff_index_
+                           : kNumBackoffDelays - 1;
+  const uint32_t delay_ms = kBackoffDelaysMs[index];
+  if (backoff_index_ < kNumBackoffDelays) {
+    ++backoff_index_;
+  }
+
+  SetState(BleState::kBackoff);
+  ESP_LOGI(kTag, "reconnecting in %lu ms", static_cast<unsigned long>(delay_ms));
+  const esp_err_t err = esp_timer_start_once(
+      backoff_timer_, static_cast<uint64_t>(delay_ms) * 1000);
+  if (err != ESP_OK) {
+    // Not expected (backoff_timer_ is only ever running between one
+    // FailConnection() and its own retry attempt, never re-armed while
+    // already pending), but this class treats every recoverable NimBLE/
+    // ESP-IDF failure as "log and continue" rather than fatal -- see
+    // FailConnection()'s own ble_gap_terminate() check for the identical
+    // pattern.
+    ESP_LOGW(kTag, "esp_timer_start_once (backoff) failed: %s",
+             esp_err_to_name(err));
+  }
+}
+
+void BleManager::OnBackoffTimer(void* arg) {
+  // Runs on the esp_timer task, not the host task -- must not touch any
+  // BleManager state directly (see the class comment's threading
+  // invariant). Only posts reconnect_event_, exactly like
+  // WriteCharacteristic() posts command_event_ from the app task.
+  auto* self = static_cast<BleManager*>(arg);
+  if (self == nullptr) {
+    return;
+  }
+  ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &self->reconnect_event_);
+}
+
+void BleManager::OnReconnectEvent(struct ble_npl_event* /*event*/) {
+  // Resolved via instance_, not the event's own arg -- same discipline as
+  // OnCommandEvent() and every GAP/GATT callback in this class.
+  if (instance_ == nullptr) {
+    return;
+  }
+  instance_->HandleReconnectEvent();
+}
+
+void BleManager::HandleReconnectEvent() {
+  if (state_ != BleState::kBackoff) {
+    // A stray/late timer fire after the state already moved on for an
+    // unrelated reason (e.g. a host reset landed mid-wait and
+    // OnHostSync() already restarted scanning on its own). Nothing to do.
+    return;
+  }
+  if (StartScan() != ESP_OK) {
+    // StartScan() already logged the specific failure. Treat it exactly
+    // like any other retry failure: FailConnection() resets the (already-
+    // clean) per-connection state and calls ScheduleReconnect() again,
+    // satisfying "retry indefinitely" rather than giving up here.
+    FailConnection("StartScan (retry)", 0);
+  }
 }
 
 void BleManager::OnHostReset(int reason) {
