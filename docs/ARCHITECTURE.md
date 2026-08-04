@@ -68,6 +68,10 @@ components/
                UiManager::Render(), and separately drains
                GroheClient::Poll() the same way; it contains no rules of
                its own.
+  firmware_info/ Read-only build metadata (version, git commit/branch/
+               dirty, build date/time) -- see "Firmware metadata (M12.3)"
+               below. Depends only on esp_app_format; nothing else in this
+               project depends on it except app/, which logs it at boot.
 main/          app_main() -> app::App.
 ```
 
@@ -81,6 +85,7 @@ app --> ui        --> dial_state, (lvgl)
 app --> encoder   --> board
 app --> grohe_ble --> (bt/nimble, nvs_flash)
 app --> dial_state
+app --> firmware_info --> (esp_app_format)
 ```
 
 `bringup` intentionally duplicates the handful of `esp_lcd`/`esp_lcd_gc9a01`
@@ -198,6 +203,79 @@ image size (~1465 KB), each slot has ~519 KB of headroom — comparable to
 what the original single-partition table had before the Wi-Fi addition,
 just doubled up safely. See `partitions.csv`'s own comment for the exact
 sizing arithmetic.
+
+## Firmware metadata (M12.3)
+
+Metadata only -- no product behaviour changes. Goal: any build can be
+identified exactly from its own boot log, with no manual step before a
+release build and no dependence on anything only present on one
+developer's machine.
+
+**Single source of truth for the version string**: `version.txt` at the
+repository root (currently `v1.0.0-dev`) -- ESP-IDF's own build system
+(`tools/cmake/project.cmake`) already reads this file first, ahead of
+`git describe`, into `PROJECT_VER`, and embeds it into the app image's
+`esp_app_desc_t.version` field (the same structure a future OTA/rollback
+check would read to compare versions between slots -- see `esp_app_desc.h`).
+Bumping the version for a release is exactly one line in one file; nothing
+else in this codebase defines or duplicates a version string. Before this
+milestone, the project had no `version.txt`, so `PROJECT_VER` silently
+drifted with every commit via `git describe` (visible in earlier build
+logs as e.g. `v0.2.0-3-g6b8d74b-dirty`) -- deliberate now, not accidental.
+
+**New `components/firmware_info/`** exposes this (plus what ESP-IDF's own
+descriptor doesn't track) through a small, dependency-free API:
+
+```cpp
+namespace firmware_info {
+const char* Version();    // esp_app_desc_t.version, e.g. "v1.0.0-dev"
+const char* GitCommit();  // build-time git short SHA, or "unknown"
+const char* GitBranch();  // build-time git branch, or "unknown"/"HEAD"
+bool        GitDirty();   // uncommitted changes at build time?
+const char* BuildDate();  // esp_app_desc_t.date  (__DATE__, local time)
+const char* BuildTime();  // esp_app_desc_t.time  (__TIME__, local time)
+}
+```
+
+`Version()`/`BuildDate()`/`BuildTime()` are thin wrappers around
+`esp_app_get_description()` -- ESP-IDF is the one source of truth for
+those three, nothing here re-derives or duplicates them. `GitCommit()`/
+`GitBranch()`/`GitDirty()` have no ESP-IDF equivalent, so
+`components/firmware_info/GenerateGitHeader.cmake` generates a small
+header (`firmware_info_git.h`, private to `firmware_info.cpp` -- nothing
+else includes it) at *build* time, not just CMake-configure time: a new
+`add_custom_target(... ALL ...)` re-runs on every `idf.py build`
+invocation (two fast `git` subprocess calls), so a new commit is reflected
+on the very next build, not just after a full reconfigure. The script
+only actually rewrites the header when its content changes, so a build
+with no new commits doesn't force a spurious recompile of
+`firmware_info.cpp`. If `git` isn't installed, or `SOURCE_DIR` isn't a git
+repository at all (e.g. a source archive with no `.git`, or any other
+environment that isn't a developer's own checkout) -- the script degrades
+to `"unknown"`/clean rather than failing the build. Nothing here is
+Espressif- or NimBLE-specific, so this component has no `REQUIRES` beyond
+`esp_app_format`, and it will keep working unchanged under GitHub
+Actions or any other CI runner that has `git` on `PATH`.
+
+**Boot log** (`app::App::Run()`, before any other subsystem's `Init()`):
+
+```
+Grohe Dial
+Firmware: v1.0.0-dev
+Commit: ba1155f (main)
+Built: Aug  4 2026 20:15:30
+```
+
+`(main, dirty)` when the working tree had uncommitted changes at build
+time. `BuildDate()`/`BuildTime()` are the build machine's local wall-clock
+time as ESP-IDF's `__DATE__`/`__TIME__`-based fields report them -- no
+timezone is attached by either ESP-IDF or this code, so nothing here
+should be read as UTC. This is deliberately a second, concise log distinct
+from ESP-IDF's own built-in, more verbose "Application information:" block
+(`esp_app_format`'s `init_show_app_info`, already printed automatically
+before `app_main()` even runs) -- both read from the same underlying
+`esp_app_desc_t`, so there is no duplicated *source*, only a second,
+shorter *rendering* of it for this project's own boot log.
 
 ## Dispense UI (M11)
 

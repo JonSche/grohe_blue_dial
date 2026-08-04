@@ -2,6 +2,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "firmware_info/firmware_info.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -28,7 +29,15 @@ constexpr uint32_t kDisplaySleepTimeoutMs = 60000;
 }  // namespace
 
 void App::Run() {
-  ESP_LOGI(kTag, "Grohe Dial booting");
+  // M12.3: every build should be identifiable from its own boot log alone
+  // -- see components/firmware_info/ for where each value actually comes
+  // from (ESP-IDF's own esp_app_desc_t for Version()/BuildDate()/
+  // BuildTime(), a build-time-generated header for the rest).
+  ESP_LOGI(kTag, "Grohe Dial");
+  ESP_LOGI(kTag, "Firmware: %s", firmware_info::Version());
+  ESP_LOGI(kTag, "Commit: %s (%s%s)", firmware_info::GitCommit(),
+           firmware_info::GitBranch(), firmware_info::GitDirty() ? ", dirty" : "");
+  ESP_LOGI(kTag, "Built: %s %s", firmware_info::BuildDate(), firmware_info::BuildTime());
 
   ESP_ERROR_CHECK(display_.Init());
 

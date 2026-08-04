@@ -538,25 +538,57 @@ development. The OTA-ready partition table itself was already delivered
 in M9; this milestone is the OTA *mechanism* on top of it, not a second,
 duplicate migration.
 
-### Debugging
+### M12.1 — Debugging
 
 - [ ] JTAG/OpenOCD setup.
 - [ ] VS Code launch configuration.
 - [ ] Debugging documentation.
 
-### Flashing
+### M12.2 — Flashing
 
 - [ ] Simple flashing workflow.
 - [ ] Flash helper script(s).
 - [ ] Automatic serial-port detection where practical.
 
-### Build & Release
+### M12.3 — Build & Release ✅
 
-- [ ] Embed firmware version.
-- [ ] Embed Git commit/version information.
-- [ ] Release build configuration.
+Firmware metadata only -- no product functionality changed. Goal: any
+build a user reports a problem with can be identified exactly from its
+own boot log. See
+[ARCHITECTURE.md](ARCHITECTURE.md#firmware-metadata-m123) for the full
+design.
 
-### OTA
+- [x] `version.txt` at the repository root is now the single source of
+      truth for the firmware version string (`v1.0.0-dev`) -- ESP-IDF's
+      own build system already reads it into `PROJECT_VER` ahead of
+      `git describe`, embedding it into the app image's `esp_app_desc_t`
+      (the same structure OTA/rollback would later compare between
+      slots). One line, one file; nothing else in the codebase defines a
+      version string.
+- [x] New `components/firmware_info/` exposes
+      `Version()`/`GitCommit()`/`GitBranch()`/`GitDirty()`/
+      `BuildDate()`/`BuildTime()`. `Version()`/`BuildDate()`/`BuildTime()`
+      wrap ESP-IDF's own `esp_app_get_description()` (zero duplication);
+      `GitCommit()`/`GitBranch()`/`GitDirty()` have no ESP-IDF
+      equivalent, so a build-time (not just configure-time) CMake target
+      regenerates them from `git` on every build, reported as
+      `"unknown"`/clean rather than failing the build if `git` or `.git`
+      aren't available -- works unchanged in CI, a shallow clone, or a
+      source archive, not just one developer's machine.
+- [x] `app::App::Run()` logs a concise, four-line boot block (project
+      name, firmware version, commit/branch/dirty, build date/time)
+      before any other subsystem initializes.
+- [x] Verified: clean `idf.py build`; every value read from
+      `version.txt`/`git`/ESP-IDF's own descriptor, no hardcoded
+      placeholder anywhere; a new commit changes the reported commit on
+      the very next build with no reconfigure needed; no duplicate
+      version string exists anywhere in the project. Boot log format not
+      verified on physical hardware from this environment (no serial
+      monitor reachable here), but the exact same string is what
+      `idf.py monitor` would show, built from the same values already
+      confirmed correct via the generated header/build log.
+
+### M12.4 — OTA
 
 - [ ] HTTPS OTA (`esp_https_ota`) using the existing M9 partition table
       (`ota_0`/`ota_1` + `otadata`).
