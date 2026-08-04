@@ -1,32 +1,136 @@
 # Grohe Dial
 
-Firmware for the [VIEWE UEDX24240013-MD50E-B](https://viewedisplay.com/product/esp32-1-28-inch-240x240-round-tft-knob-display-gc9a01-arduino-lvgl/):
-an ESP32-C3 module with a 1.28" round 240x240 GC9A01 SPI display and an
-onboard rotary encoder + button.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.3%2B-blue)](https://github.com/espressif/esp-idf)
+[![Platform](https://img.shields.io/badge/platform-ESP32--C3-blue)](https://www.espressif.com/en/products/socs/esp32-c3)
+[![Status](https://img.shields.io/badge/status-active%20development-yellow)](docs/ROADMAP.md)
 
-**Current milestone (M0):** raw hardware bring-up. `main` boots straight
-into `bringup::ColorCycleTest`, which fills the whole screen with solid
-red/green/blue/white/black, one second each, using only `esp_lcd` +
-`esp_lcd_gc9a01` — no LVGL yet. This is deliberately the very first thing to
-verify, before any UI framework is layered on top; see
-[`docs/ROADMAP.md`](docs/ROADMAP.md).
+A small, round, physical dial that controls a [GROHE Blue](https://www.grohe.com/) Home
+water appliance over Bluetooth Low Energy — rotate to choose an amount, press
+to pour.
 
-The M1 milestone (LVGL boot screen showing "Grohe Dial") is already built
-and lives under `components/{display,ui,app}`, just not currently wired to
-`main` — see ROADMAP.md for when that switches back.
+## Project
 
-No BLE yet either way — the architecture is modular so a `GroheBleClient`
-component can be added later without restructuring anything below.
+Grohe Dial is native [ESP-IDF](https://github.com/espressif/esp-idf) (C++20)
+firmware for a round ESP32-C3 display/encoder module. It talks directly to a
+GROHE Blue Home appliance over BLE, using an independently reverse-engineered
+protocol (see [Reverse engineering](#reverse-engineering) below) — there is no
+cloud dependency and no GROHE app in the loop.
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how the components
-fit together and [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next.
+- **ESP32-C3-based smart dial**: a 240×240 round display, a rotary encoder,
+  and a push button are the entire user interface.
+- **Controls a GROHE Blue appliance over BLE**: authenticated dispense/stop
+  commands, sent directly to the appliance.
+- **Reverse-engineered protocol**: no official SDK exists for this appliance;
+  the protocol was independently reverse-engineered and is implemented here
+  from first principles (own HMAC/payload code, own BLE state machine).
+- **Home Assistant integration is optional, not required**: the dial is fully
+  usable — dispense, stop, reconnect, everything — with no Home Assistant,
+  no Wi-Fi even, present at all. A future, optional integration (see
+  [Roadmap](#roadmap)) extends the product; it never becomes a dependency of
+  it.
 
-## Requirements
+## Features
 
-- ESP-IDF v5.3 or newer, with the IDF Component Manager (bundled by default).
+Implemented:
+
+- [x] BLE communication with the appliance (NimBLE), including automatic
+      reconnect with backoff after a dropped or failed connection
+- [x] Authenticated dispense (HMAC-signed commands, ported from the
+      reverse-engineered protocol)
+- [x] Stop dispense mid-pour
+- [x] Three water types: Still / Medium / Sparkling
+- [x] Rotary-encoder-driven round UI (amount, water type, live progress ring,
+      connection/time status)
+- [x] Display sleep (backlight-only inactivity timeout)
+- [x] SNTP time synchronization (a one-shot Wi-Fi connection at boot; not a
+      runtime dependency for anything else)
+- [x] Firmware version/build metadata embedded in every build, logged at boot
+- [x] OTA update engine (`esp_https_ota`-based, from a specified HTTPS URL) —
+      the engine is implemented; nothing calls it automatically yet
+
+Planned:
+
+- [ ] Simple flashing workflow and helper scripts
+- [ ] JTAG/OpenOCD debugging setup
+- [ ] GitHub Releases as the firmware distribution mechanism for OTA
+- [ ] Optional Home Assistant integration — configuration, diagnostics, and
+      appliance status (CO₂, filter, firmware version); never required for
+      basic dispensing
+
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full, itemized milestone
+list.
+
+## Hardware
+
+- **MCU**: ESP32-C3 (single-core RISC-V, Wi-Fi + BLE).
+- **Display**: 1.28", 240×240 round GC9A01 SPI display.
+- **Input**: a quadrature rotary encoder with an integrated push button.
+- **Current development hardware**: [VIEWE
+  UEDX24240013-MD50E-B](https://viewedisplay.com/product/esp32-1-28-inch-240x240-round-tft-knob-display-gc9a01-arduino-lvgl/),
+  an off-the-shelf ESP32-C3 + display + encoder module — see
+  [`components/board/include/board/board_config.hpp`](components/board/include/board/board_config.hpp)
+  for the exact pinout.
+- **Custom PCB**: planned for a future milestone; the current hardware is
+  intentionally an off-the-shelf module so the firmware architecture can
+  mature before committing to board design.
+
+| Function | GPIO |
+|---|---|
+| LCD SCLK | 1 |
+| LCD MOSI/SDA | 0 |
+| LCD CS | 10 |
+| LCD DC | 4 |
+| LCD Backlight | 8 |
+| LCD Reset | none (module has no reset line) |
+| Encoder Phase A | 7 |
+| Encoder Phase B | 6 |
+| Button | 9 |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    F[Grohe Dial Firmware] -->|BLE| G[GROHE Blue Home]
+    F -.->|optional, HTTPS| H[Home Assistant]
+```
+
+The firmware talks to the appliance directly over BLE — that link is the
+whole product. Home Assistant is an optional, separate integration hanging
+off the side, never a dependency of the BLE path.
+
+Internally, the firmware is a small set of single-purpose components (BLE,
+display, encoder, UI, time sync, OTA, ...) wired together by one composition
+root, with dependencies pointing strictly one way. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full component map,
+the BLE protocol/state-machine writeup, and the reasoning behind every
+non-obvious decision.
+
+## Project status
+
+The core product is implemented and hardware-validated: BLE pairing/
+reconnect, authenticated dispense/stop (Still and Sparkling), the dial UI,
+SNTP time sync, and display sleep have all been verified on real hardware.
+Medium water type is implemented but not yet confirmed on the physical
+appliance. Firmware versioning and an OTA update engine are implemented and
+build-verified; OTA itself is still awaiting a full on-hardware update/
+rollback validation pass.
+
+Current development focus: developer tooling — a simple flashing workflow
+and JTAG/OpenOCD debugging setup — ahead of the optional Home Assistant
+integration.
+
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the complete, itemized
+milestone history and what's next, and the "v1.0 Release Criteria" section
+at the bottom of it for what "done" means for this project.
+
+## Building
+
+Requirements:
+
+- [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/get-started/index.html)
+  v5.3 or newer, with the IDF Component Manager (bundled by default).
 - Target: `esp32c3`.
-
-## Build
 
 ```sh
 . $IDF_PATH/export.sh
@@ -34,49 +138,80 @@ idf.py set-target esp32c3
 idf.py build flash monitor
 ```
 
-For the current (M0) milestone, the only managed dependency is
-`esp_lcd_gc9a01` — no network-fetched LVGL/`esp_lvgl_port` involved. Those
-get pulled in once `main` is switched back to `app::App` (M1+).
+Real appliance/Wi-Fi credentials are never committed — copy the two
+`*_local.hpp.example` files under `components/grohe_ble/` and
+`components/time_service/` to their non-`.example` names and fill in your
+own values before building against a real appliance.
 
-## Layout
+## OTA
 
-```
-components/
-  board/     Single source of truth for this board's GPIO pinout/bus config.
-  bringup/   Raw esp_lcd + esp_lcd_gc9a01 color-cycle smoke test. No LVGL.
-             This is what main/ currently runs (M0).
-  display/   GC9A01 panel bring-up (SPI + esp_lcd) and the esp_lvgl_port glue
-             that turns it into an lv_display_t.
-  encoder/   Quadrature rotary encoder (hardware PCNT decode) + push button.
-  ui/        LVGL screen/widget tree. Knows nothing about display or
-             hardware drivers — just takes an lv_display_t*.
-  app/       Composition root. Owns one instance of each of the above and
-             wires them together; the only place that knows about all of
-             them at once.
-main/        Thin entry point: currently constructs bringup::ColorCycleTest
-             and calls Run() (see M0 above); switches to app::App at M1+.
-```
+Firmware updates use ESP-IDF's own `esp_https_ota`/`esp_ota_ops` — no custom
+OTA protocol. The flash layout has been OTA-ready (`ota_0`/`ota_1` +
+`otadata`) since early on, and bootloader-level rollback is enabled: a
+freshly-flashed image that crashes before confirming itself automatically
+reverts to the previous working image on the next boot.
 
-Each component only depends on the ones below it in that list (plus
-`board`), so a new peripheral — most notably a future `GroheBleClient`
-component for the BLE control channel — plugs in as a sibling component and
-gets wired up in `app::App` without touching `display`, `encoder`, or `ui`.
+**GitHub Releases** is the intended firmware distribution mechanism — a
+tagged release's attached firmware binary becomes the URL the OTA engine is
+pointed at. That distribution/discovery layer isn't built yet (see
+[Features](#features) above); today the OTA engine takes a plain,
+caller-supplied HTTPS URL.
 
-## Board pinout (UEDX24240013-MD50E-B)
+## Reverse engineering
 
-See [`components/board/include/board/board_config.hpp`](components/board/include/board/board_config.hpp)
-for the authoritative list; summarized here:
+GROHE does not publish a protocol specification or SDK for this appliance.
+The BLE protocol this firmware speaks — service/characteristic layout,
+authenticated command format, response codes — was independently
+reverse-engineered from the official mobile app's own behavior and traffic,
+documented, and then re-implemented from scratch in this codebase.
 
-| Function          | GPIO |
-|--------------------|------|
-| LCD SCLK           | 1    |
-| LCD MOSI/SDA       | 0    |
-| LCD CS             | 10   |
-| LCD DC             | 4    |
-| LCD TE (unused)    | 5    |
-| LCD Backlight      | 8    |
-| LCD Reset          | none (module has no reset line) |
-| Encoder Phase A    | 7    |
-| Encoder Phase B    | 6    |
-| Button             | 9    |
-| UART RX / TX       | 20 / 21 |
+This repository does **not** contain decompiled app code. What it does
+contain:
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): this firmware's own
+  protocol write-up, including a per-field evidence/confidence table for
+  every piece of appliance state this firmware relies on.
+- A companion project,
+  [`grohe_blue_ble`](https://github.com/JonSche/grohe_blue_ble), holds the
+  original Python reference implementation and the underlying reverse-
+  engineering findings (packet captures, evidence notes) this firmware's
+  protocol layer was ported from.
+
+## Disclaimer
+
+This project is an independent open source project and is not affiliated
+with, endorsed by, or sponsored by GROHE AG.
+
+## Screenshots
+
+**UI concept**
+
+![Grohe Dial UI mockup](docs/ui/mockups/hero-mockup.png)
+
+**Hardware**
+
+![Hardware photo — coming soon](docs/images/hardware.jpg)
+
+**Display**
+
+![Display photo — coming soon](docs/images/display.jpg)
+
+**Wiring**
+
+![Wiring diagram — coming soon](docs/images/wiring.jpg)
+
+## Roadmap
+
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full milestone-by-milestone
+history and what's planned next.
+
+## Contributing
+
+Issues and pull requests are welcome — this is a small, single-appliance
+project, so please open an issue to discuss anything non-trivial before
+sending a PR. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the
+component boundaries and conventions the codebase follows.
+
+## License
+
+[MIT](LICENSE)
