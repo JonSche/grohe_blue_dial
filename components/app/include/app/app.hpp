@@ -4,13 +4,16 @@
 #include "display/gc9a01_display.hpp"
 #include "encoder/encoder_input.hpp"
 #include "grohe_ble/grohe_client.hpp"
+#include "ota/ota_manager.hpp"
 #include "ui/ui_manager.hpp"
 
 namespace app {
 
 // Composition root: owns every subsystem and wires them together. This is
-// the one place that knows about all of display/, encoder/, ui/ and
-// grohe_ble/, which keeps those components decoupled from each other.
+// the one place that knows about all of display/, encoder/, ui/,
+// grohe_ble/, and (M12.4) ota/, which keeps those components decoupled
+// from each other -- ota:: in particular has no idea any of the others
+// exist (see ota_manager.hpp's own comment).
 //
 // App itself contains no interaction rules: it only polls EncoderInput for
 // events, hands them to DialController, and re-renders UiManager from the
@@ -41,6 +44,14 @@ class App {
   encoder::EncoderInput encoder_input_;
   DialController dial_controller_;
   grohe_ble::GroheClient grohe_client_;
+
+  // M12.4: owned here (the composition root), like every other subsystem,
+  // but Run() only ever calls Init() on it -- CheckForUpdate()/
+  // StartUpdate() have no caller yet in this milestone (no automatic
+  // update checks, no background task; see ota_manager.hpp's own class
+  // comment). A future Home Assistant integration (M13) or a manual
+  // trigger calls them later, through this same instance.
+  ota::OtaManager ota_;
 };
 
 }  // namespace app

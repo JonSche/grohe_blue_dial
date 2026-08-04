@@ -39,6 +39,12 @@ void App::Run() {
            firmware_info::GitBranch(), firmware_info::GitDirty() ? ", dirty" : "");
   ESP_LOGI(kTag, "Built: %s %s", firmware_info::BuildDate(), firmware_info::BuildTime());
 
+  // M12.4: confirms this boot is healthy (cancelling any pending OTA
+  // rollback) before anything else runs -- see OtaManager::Init()'s own
+  // comment. Cheap and always safe to call; not gated on any of the
+  // subsystems below.
+  ota_.Init();
+
   ESP_ERROR_CHECK(display_.Init());
 
   if (display::Gc9a01Display::Lock()) {

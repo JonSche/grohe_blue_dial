@@ -72,6 +72,13 @@ components/
                dirty, build date/time) -- see "Firmware metadata (M12.3)"
                below. Depends only on esp_app_format; nothing else in this
                project depends on it except app/, which logs it at boot.
+  ota/         OtaManager: checks for and installs a firmware update from
+               a caller-supplied HTTPS URL (esp_https_ota/esp_ota_ops) --
+               see "OTA (M12.4)" below. Depends on firmware_info (to read
+               the running version, read-only) and nothing else in this
+               project; nothing else depends on it except app/, which
+               only calls Init() (rollback confirmation) -- Check/
+               StartUpdate() have no caller yet in this milestone.
 main/          app_main() -> app::App.
 ```
 
@@ -86,6 +93,7 @@ app --> encoder   --> board
 app --> grohe_ble --> (bt/nimble, nvs_flash)
 app --> dial_state
 app --> firmware_info --> (esp_app_format)
+app --> ota --> firmware_info, (esp_https_ota, esp_ota_ops/app_update, mbedtls)
 ```
 
 `bringup` intentionally duplicates the handful of `esp_lcd`/`esp_lcd_gc9a01`
@@ -276,6 +284,132 @@ from ESP-IDF's own built-in, more verbose "Application information:" block
 before `app_main()` even runs) -- both read from the same underlying
 `esp_app_desc_t`, so there is no duplicated *source*, only a second,
 shorter *rendering* of it for this project's own boot log.
+
+## OTA (M12.4)
+
+The deployment foundation's other half: M9 built the OTA-ready partition
+table (`ota_0`/`ota_1`/`otadata`), M12.3 gave every build an identifiable
+version -- this milestone is the OTA *mechanism* itself. Reuses ESP-IDF's
+own `esp_https_ota`/`esp_ota_ops` entirely; no custom OTA protocol, no
+custom image format, no custom flash-write code anywhere in this project.
+
+**New `components/ota/`, one class, `ota::OtaManager`**, deliberately
+independent of every other subsystem -- no knowledge of BLE, the Grohe
+protocol, dispensing, `DialController`, or UI, matching the exact
+"new concern is a new sibling component" principle already established
+for `grohe_ble`/`time_service`/`firmware_info`. The only other component
+it touches is `firmware_info`, read-only, purely to compare the running
+version against a candidate image's version -- the single place version
+comparison logic exists (see "Version handling" below).
+
+```cpp
+namespace ota {
+enum class OtaState { kIdle, kChecking, kDownloading, kVerifying,
+                       kInstalling, kRebooting, kComplete, kFailed };
+struct UpdateCheckResult { bool update_available; char remote_version[32]; };
+
+class OtaManager {
+ public:
+  void Init();                                    // confirm/cancel rollback
+  UpdateCheckResult CheckForUpdate(const char* url);  // header only, no flash write
+  esp_err_t StartUpdate(const char* url);          // download, flash, reboot
+  OtaState State() const;
+  int Progress() const;                            // 0-100, or -1 if unknown
+  esp_err_t LastError() const;
+};
+}
+```
+
+**`CheckForUpdate()` vs. `StartUpdate()`** are independent, composable
+calls, not a cached two-phase handshake -- `StartUpdate()` never trusts a
+prior `CheckForUpdate()` result and re-derives everything itself, so a
+stale check can never justify skipping a real check at flash time.
+`CheckForUpdate()` calls `esp_https_ota_begin()` then
+`esp_https_ota_get_img_desc()` (reads only the new image's header) then
+immediately `esp_https_ota_abort()` -- the full connection lifecycle,
+minus ever writing to flash, exactly the "peek at the header before
+committing" pattern ESP-IDF's own `advanced_https_ota` example
+documents. `StartUpdate()` does the same `begin`/`get_img_desc` pair
+itself, then loops `esp_https_ota_perform()` to download and flash, then
+`esp_https_ota_finish()` to validate and switch the boot partition, then
+`esp_restart()`.
+
+**Version handling reuses M12.3 entirely.** Both calls compare the
+candidate image's `esp_app_desc_t.version` (from
+`esp_https_ota_get_img_desc()`) against `firmware_info::Version()` (the
+one place the *running* version is ever read) with a plain
+`strncmp()` -- there is no second version-comparison mechanism anywhere
+in this project. `StartUpdate()` refuses to proceed
+(`OtaState::kFailed`/`ESP_ERR_INVALID_VERSION`) if the two are identical,
+mirroring the same defensive check ESP-IDF's own example performs before
+ever writing a byte to flash.
+
+**Error handling** maps directly onto where each ESP-IDF call can fail --
+no separate error-classification logic of its own:
+
+| Failure | Where it surfaces |
+|---|---|
+| Network failure, TLS failure | `esp_https_ota_begin()` (connection/handshake) |
+| HTTP error, malformed header | `esp_https_ota_get_img_desc()` |
+| Version mismatch | The `strncmp()` check above, before any flash write |
+| Interrupted download, invalid image (bad magic, wrong chip ID -- `esp_https_ota_perform()` verifies chip ID itself) | `esp_https_ota_perform()`'s loop |
+| Verification failure, incomplete image | `esp_https_ota_is_complete_data_received()` / `esp_https_ota_finish()` |
+
+Every failure path calls `esp_https_ota_abort()` (never after
+`esp_https_ota_finish()`, which frees the handle unconditionally on its
+own -- calling both would be a double free) and returns before
+`esp_ota_set_boot_partition()` is ever reached, which only happens
+inside a *successful* `esp_https_ota_finish()`. The currently running
+partition is therefore never touched on any failure -- not a property
+this code has to maintain itself, but a direct consequence of only ever
+calling `esp_https_ota_finish()` once, at the very end, on the success
+path.
+
+**Rollback** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, newly enabled in
+`sdkconfig.defaults`): a freshly-flashed OTA image boots in
+`ESP_OTA_IMG_PENDING_VERIFY` state; if it crashes, watchdogs, or loses
+power before being confirmed, the bootloader automatically reverts to
+the previous working image on the next boot. `OtaManager::Init()` --
+called once, early, from `App::Run()`, unconditionally on every boot --
+calls `esp_ota_mark_app_valid_cancel_rollback()` to confirm the running
+image (a safe no-op if this boot wasn't the result of a pending OTA at
+all). If the running partition *was* pending-verify, `Init()` also sets
+`State()` to `OtaState::kComplete` first -- simply reaching that check
+from running application code, not a crash loop, is itself the
+confirmation that the just-installed update is healthy. This is base
+rollback (`esp_ota_get_state_partition()`/pending-verify), not
+anti-rollback (`CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK`, a separate,
+security-version-based downgrade-prevention feature left untouched --
+not needed for "a bad update can't brick the dial," the guarantee this
+milestone actually asks for).
+
+**Progress/state** are exposed as three independent `std::atomic`
+members (`state_`/`progress_`/`last_error_`), the same "written by a
+busy task, read by an unrelated poller" reasoning already used for
+`BleManager::conn_handle_` (M7) and `SntpTimeProvider::valid_` (M9) --
+`StartUpdate()` runs synchronously on whichever task calls it (this
+component spawns no task of its own, and nothing in this milestone calls
+`CheckForUpdate()`/`StartUpdate()` automatically), while `State()`/
+`Progress()`/`LastError()` can be polled from any other task without a
+mutex. `Progress()` is a real percentage (`bytes read / esp_https_ota_get_
+image_size()`) when the server reports a `Content-Length`, or `-1` --
+never a fabricated number -- for a chunked-transfer response that
+doesn't.
+
+**Future integration points, deliberately not built here:**
+- **Home Assistant (M13)** would own *when* to call `CheckForUpdate()`/
+  `StartUpdate()` (a user-triggered action, a scheduled check, whatever
+  M13 decides) and *where* the URL comes from -- `OtaManager` itself has
+  no opinion on either, which is exactly why the URL is a plain
+  parameter on both calls rather than configuration `OtaManager` owns.
+- **GitHub Releases / a release server** would be whatever produces the
+  URL passed in -- resolving a "latest release" URL into a concrete
+  asset URL is a separate concern this milestone deliberately doesn't
+  implement (see the milestone's own scope: "configurable HTTPS URL",
+  not a release-discovery protocol).
+- **Automatic update checks** (a timer, a boot-time check) would be a
+  caller wrapping `CheckForUpdate()`, not a change to `OtaManager`
+  itself, which stays purely reactive.
 
 ## Dispense UI (M11)
 
