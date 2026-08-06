@@ -56,6 +56,13 @@ class WifiConnection {
   // extracted from). Otherwise joins whatever's already in flight or
   // already connected/failed. Returns immediately either way.
   //
+  // "Connected" (on_ready(), or Acquire() below returning true) always
+  // means both WIFI_EVENT_STA_CONNECTED (L2 association) *and*
+  // IP_EVENT_STA_GOT_IP (DHCP complete) have happened for this cycle --
+  // never just the former. A caller that gets on_ready()/true has a
+  // genuinely usable IP connection and needs no Wi-Fi check of its own
+  // before starting HTTPS or any other networking.
+  //
   // on_ready()/on_failed() -- each optional, pass nullptr to skip -- run
   // on the default event loop's own task the moment *this* acquisition
   // resolves (or inline, synchronously, if it resolves immediately --
@@ -111,6 +118,13 @@ class WifiConnection {
   // see HandleWifiOrIpEvent()'s own comment for why Acquire()/
   // AcquireAsync() being callable from any task doesn't change this.
   int retry_count_ = 0;
+  // Set once WIFI_EVENT_STA_CONNECTED (L2 association) fires for the
+  // current cycle; IP_EVENT_STA_GOT_IP is only allowed to resolve
+  // kConnectedBit while this is true -- the concrete enforcement behind
+  // the "STA_CONNECTED and GOT_IP" contract documented on
+  // AcquireAsync() above. Not an event-group bit of its own: nothing
+  // outside this class needs to wait on association alone.
+  bool sta_connected_ = false;
   std::function<void()> pending_ready_;
   std::function<void()> pending_failed_;
 

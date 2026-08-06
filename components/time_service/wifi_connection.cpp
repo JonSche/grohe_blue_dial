@@ -149,6 +149,7 @@ void WifiConnection::AcquireAsync(std::function<void()> on_ready,
     // specifically so this 0->1 transition never has to race a concurrent
     // second caller (see Acquire()'s comment for the race this avoids).
     retry_count_ = 0;
+    sta_connected_ = false;
     if (StartConnecting() != ESP_OK) {
       // Synchronous setup failure, on this calling task -- resolve
       // immediately, no async event is ever coming for this cycle.
@@ -193,6 +194,7 @@ bool WifiConnection::Acquire(TickType_t timeout) {
   const int prev = ref_count_.fetch_add(1);
   if (prev == 0) {
     retry_count_ = 0;
+    sta_connected_ = false;
     if (StartConnecting() != ESP_OK) {
       return false;  // kFailedBit already set by StartConnecting() itself.
     }
@@ -251,7 +253,16 @@ void WifiConnection::HandleWifiOrIpEvent(esp_event_base_t base, int32_t id,
   }
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
     TryConnect();
+  } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+    // L2 association only -- not yet a usable IP connection. Tracked
+    // separately (not an event-group bit -- see the header's own comment)
+    // purely so IP_EVENT_STA_GOT_IP below has something real to require
+    // before it's allowed to resolve kConnectedBit. Never resolves
+    // Acquire()/AcquireAsync() by itself.
+    ESP_LOGI(kTag, "Wi-Fi associated; waiting for IP");
+    sta_connected_ = true;
   } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+    sta_connected_ = false;
     if (retry_count_ < kMaxWifiRetries) {
       ++retry_count_;
       ESP_LOGW(kTag, "Wi-Fi disconnected, retry %d/%d", retry_count_,
@@ -263,7 +274,19 @@ void WifiConnection::HandleWifiOrIpEvent(esp_event_base_t base, int32_t id,
       Resolve(false);
     }
   } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-    ESP_LOGI(kTag, "Wi-Fi connected");
+    // ESP-IDF's own contract guarantees STA_CONNECTED always precedes
+    // GOT_IP (DHCP only ever starts after L2 association), so this
+    // should never actually fire -- kept as a hard requirement, not just
+    // a comment, per the explicit "STA_CONNECTED AND GOT_IP" contract
+    // Acquire()/AcquireAsync() callers rely on: OtaManager in particular
+    // starts HTTPS the instant Acquire() returns success, with no Wi-Fi
+    // check of its own, so this class -- not its caller -- is the one
+    // place that must actually enforce it.
+    if (!sta_connected_) {
+      ESP_LOGE(kTag, "GOT_IP without a prior STA_CONNECTED; ignoring");
+      return;
+    }
+    ESP_LOGI(kTag, "Wi-Fi connected (associated + IP acquired)");
     Resolve(true);
   }
 }
