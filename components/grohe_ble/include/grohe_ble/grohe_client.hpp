@@ -6,8 +6,10 @@
 #include "grohe_ble/ble_manager.hpp"
 #include "grohe_ble/grohe_credentials.hpp"
 #include "grohe_ble/grohe_protocol.hpp"
+// sntp_time_provider.hpp transitively includes wifi_connection.hpp, which
+// is where time_service::WifiConnection (used below, by reference) is
+// actually declared.
 #include "time_service/sntp_time_provider.hpp"
-#include "time_service/wifi_credentials.hpp"
 
 namespace grohe_ble {
 
@@ -44,7 +46,13 @@ struct CommandOutcome {
 // either of them knowing about sequencing themselves.
 class GroheClient {
  public:
-  GroheClient() = default;
+  // wifi_connection must outlive this object (dependency injection, not
+  // an owned instance -- as of M12.5, shared with ota::OtaManager, so it
+  // lives at the composition root (app::App) rather than being
+  // constructed internally here; see wifi_connection.hpp's own comment
+  // and docs/ARCHITECTURE.md#wifi-ownership-m125). Forwarded straight
+  // through to time_provider_ -- this class has no other use for it.
+  explicit GroheClient(time_service::WifiConnection& wifi_connection);
 
   esp_err_t Init();
 
@@ -92,16 +100,16 @@ class GroheClient {
   GroheProtocol protocol_;
   LocalCredentialsProvider credentials_provider_;
 
-  // M9: time_provider_ is injected with wifi_credentials_provider_ by
-  // reference (not owned internally by SntpTimeProvider) so a future
-  // WifiCredentialsProvider implementation (NVS, Wi-Fi provisioning, ...)
-  // only requires changing this one construction line -- see
-  // time_service/wifi_credentials.hpp's own comment. Declared in this
-  // order so wifi_credentials_provider_ is fully constructed before
-  // time_provider_'s constructor runs (member init order follows
-  // declaration order in C++, not the mem-initializer-list order below).
-  time_service::LocalWifiCredentialsProvider wifi_credentials_provider_;
-  time_service::SntpTimeProvider time_provider_{wifi_credentials_provider_};
+  // M9: time_provider_ needs a Wi-Fi connection purely as a one-shot SNTP
+  // time source. As of M12.5 that connection (time_service::
+  // WifiConnection) is injected from outside (the constructor parameter
+  // above) rather than owned here, because ota::OtaManager -- a sibling
+  // of this class, not something it knows about -- needs to share the
+  // exact same connection rather than run a second, independent one
+  // against the one physical Wi-Fi radio this chip has. See
+  // wifi_connection.hpp's own comment and
+  // docs/ARCHITECTURE.md#wifi-ownership-m125.
+  time_service::SntpTimeProvider time_provider_;
 
   // Gate for SendCommand(): both become true independently and in no
   // guaranteed order (hardware evidence shows ReadyForProtocol can fire

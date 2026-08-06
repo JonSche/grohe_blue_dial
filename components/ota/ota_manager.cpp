@@ -6,11 +6,40 @@
 #include "esp_https_ota.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_wifi.h"
 #include "firmware_info/firmware_info.hpp"
+#include "time_service/wifi_connection.hpp"
 
 namespace ota {
 namespace {
 constexpr char kTag[] = "ota";
+
+// How long CheckForUpdate()/StartUpdate() wait for Wi-Fi before giving up
+// -- generous enough for WifiConnection's own several retries (each a
+// real connect attempt, not an instant failure) to play out, not so long
+// that a genuinely unreachable network hangs the calling task for
+// minutes. Wi-Fi is not this component's own concern beyond this one
+// timeout value -- see wifi_connection.hpp for the actual retry policy.
+constexpr TickType_t kWifiAcquireTimeout = pdMS_TO_TICKS(30'000);
+
+// Releases the shared WifiConnection acquisition on every exit path --
+// success or any of StartUpdate()/CheckForUpdate()'s several early
+// returns -- without repeating `wifi_connection_.Release();` before each
+// one. Constructed unconditionally right after Acquire(), whether it
+// returned true or false: WifiConnection's own contract is "Acquire()
+// always holds a reference regardless of the outcome; Release() exactly
+// once regardless too" -- see wifi_connection.hpp.
+class WifiGuard {
+ public:
+  explicit WifiGuard(time_service::WifiConnection& wifi) : wifi_(wifi) {}
+  ~WifiGuard() { wifi_.Release(); }
+
+  WifiGuard(const WifiGuard&) = delete;
+  WifiGuard& operator=(const WifiGuard&) = delete;
+
+ private:
+  time_service::WifiConnection& wifi_;
+};
 
 // Shared by CheckForUpdate() and StartUpdate() -- both need the exact
 // same connection setup, just take it to a different depth afterward.
@@ -33,6 +62,9 @@ esp_http_client_config_t MakeHttpConfig(const char* url) {
   return http_config;
 }
 }  // namespace
+
+OtaManager::OtaManager(time_service::WifiConnection& wifi_connection)
+    : wifi_connection_(wifi_connection) {}
 
 void OtaManager::Init() {
   const esp_partition_t* running = esp_ota_get_running_partition();
@@ -68,6 +100,16 @@ esp_err_t OtaManager::Fail(esp_err_t err) {
 
 UpdateCheckResult OtaManager::CheckForUpdate(const char* url) {
   UpdateCheckResult result;
+
+  state_.store(OtaState::kConnectingWifi);
+  const bool wifi_ok = wifi_connection_.Acquire(kWifiAcquireTimeout);
+  WifiGuard wifi_guard(wifi_connection_);
+  if (!wifi_ok) {
+    ESP_LOGW(kTag, "CheckForUpdate: Wi-Fi not available");
+    Fail(ESP_ERR_WIFI_NOT_CONNECT);
+    state_.store(OtaState::kIdle);
+    return result;
+  }
 
   state_.store(OtaState::kChecking);
 
@@ -110,6 +152,15 @@ UpdateCheckResult OtaManager::CheckForUpdate(const char* url) {
 esp_err_t OtaManager::StartUpdate(const char* url) {
   progress_.store(-1);
   last_error_.store(ESP_OK);
+
+  state_.store(OtaState::kConnectingWifi);
+  const bool wifi_ok = wifi_connection_.Acquire(kWifiAcquireTimeout);
+  WifiGuard wifi_guard(wifi_connection_);
+  if (!wifi_ok) {
+    ESP_LOGE(kTag, "StartUpdate: Wi-Fi not available");
+    return Fail(ESP_ERR_WIFI_NOT_CONNECT);
+  }
+
   state_.store(OtaState::kChecking);
 
   const esp_http_client_config_t http_config = MakeHttpConfig(url);

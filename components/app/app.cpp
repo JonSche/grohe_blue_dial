@@ -35,9 +35,10 @@ constexpr uint32_t kDisplaySleepTimeoutMs = 60000;
 // purely for developer testing: normal dial operation (dispense, stop,
 // water type, display sleep, BLE) is completely unaffected either way.
 //
-// The one place the test OTA image URL is defined -- replace with a
-// real, reachable HTTPS URL before exercising this hook.
-constexpr char kDeveloperOtaUrl[] = "https://CHANGE-ME.example.com/grohe_dial.bin";
+// The one place the test OTA image URL is defined.
+constexpr char kDeveloperOtaUrl[] =
+    "https://github.com/JonSche/grohe_blue_dial/releases/download/"
+    "v1.0.1-dev/grohe_dial.bin";
 constexpr int64_t kDevOtaHoldThresholdUs = 5'000'000;  // ~5 s.
 #endif  // CONFIG_GROHE_DEV_FEATURES
 }  // namespace
@@ -58,6 +59,16 @@ void App::Run() {
   // comment. Cheap and always safe to call; not gated on any of the
   // subsystems below.
   ota_.Init();
+
+  // M12.5: one-time Wi-Fi driver/event-loop setup (NVS, netif, the
+  // default event loop, this class's own event handlers) -- does not
+  // connect yet. Must happen before grohe_client_.Init() below, which
+  // (via its own SntpTimeProvider) is the first thing to actually
+  // acquire a connection through it; ota_'s later CheckForUpdate()/
+  // StartUpdate() calls share this exact same instance rather than
+  // bringing up a second, independent Wi-Fi session -- see
+  // wifi_connection.hpp's own comment.
+  ESP_ERROR_CHECK(wifi_connection_.Init());
 
   ESP_ERROR_CHECK(display_.Init());
 

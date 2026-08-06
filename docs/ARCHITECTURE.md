@@ -72,13 +72,20 @@ components/
                dirty, build date/time) -- see "Firmware metadata (M12.3)"
                below. Depends only on esp_app_format; nothing else in this
                project depends on it except app/, which logs it at boot.
+  time_service/ SntpTimeProvider (a one-shot SNTP time source) and, as of
+               M12.5, WifiConnection -- the one place this firmware brings
+               Wi-Fi up or down, shared with ota/ below. See "Wi-Fi
+               ownership (M12.5)" below. No dependency on anything else in
+               this project.
   ota/         OtaManager: checks for and installs a firmware update from
                a caller-supplied HTTPS URL (esp_https_ota/esp_ota_ops) --
-               see "OTA (M12.4)" below. Depends on firmware_info (to read
-               the running version, read-only) and nothing else in this
-               project; nothing else depends on it except app/, which
-               only calls Init() (rollback confirmation) -- Check/
-               StartUpdate() have no caller yet in this milestone.
+               see "OTA (M12.4)"/"Wi-Fi ownership (M12.5)" below. Depends
+               on firmware_info (to read the running version, read-only)
+               and time_service (WifiConnection, shared with
+               SntpTimeProvider -- see below); nothing else depends on it
+               except app/, which owns the instance and calls Init()
+               (rollback confirmation) -- Check/StartUpdate() have no
+               caller yet in this milestone.
 main/          app_main() -> app::App.
 ```
 
@@ -93,7 +100,11 @@ app --> encoder   --> board
 app --> grohe_ble --> (bt/nimble, nvs_flash)
 app --> dial_state
 app --> firmware_info --> (esp_app_format)
-app --> ota --> firmware_info, (esp_https_ota, esp_ota_ops/app_update, mbedtls)
+app --> time_service --> (esp_wifi, esp_netif, esp_event, lwip, nvs_flash)
+app --> ota --> firmware_info, time_service, (esp_https_ota, esp_ota_ops/app_update, mbedtls)
+grohe_ble --> time_service  (GroheClient's SntpTimeProvider; M12.5: takes
+                             WifiConnection& from app, doesn't construct
+                             it -- see "Wi-Fi ownership (M12.5)")
 ```
 
 `bringup` intentionally duplicates the handful of `esp_lcd`/`esp_lcd_gc9a01`
@@ -428,6 +439,95 @@ implementation removed entirely (identical). This is a physical-access
 firmware-update trigger with no authentication beyond "someone is
 holding the button" -- appropriate for validating `components/ota/` on
 a development unit, never for a build meant to run day to day.
+
+## Wi-Fi ownership (M12.5)
+
+**The bug this fixes**: `ota::OtaManager::CheckForUpdate()`/
+`StartUpdate()` called `esp_https_ota_begin()` directly, with no idea
+whether Wi-Fi was even up. On real hardware this meant: Wi-Fi connects at
+boot, `SntpTimeProvider` syncs and tears Wi-Fi back down (M9's own
+"never a runtime dependency" design, working exactly as intended), then
+-- potentially much later, e.g. via the M12.4 dev hook -- `StartUpdate()`
+tries to resolve `github.com` over a radio that's been powered off for
+tens of seconds, and `esp_https_ota_begin()` fails with
+`ESP_ERR_HTTP_CONNECT` (DNS resolution failure).
+
+**Why not just have OTA run its own, independent Wi-Fi connect/retry/
+teardown** (the milestone's own explicit constraint: "reuse the existing
+Wi-Fi infrastructure... do not duplicate Wi-Fi logic"). Beyond the
+letter of that instruction, there is only one physical Wi-Fi radio on
+this chip -- two independent `esp_wifi_init()`/`esp_wifi_deinit()`
+state machines racing each other (SNTP's existing one, and a
+hypothetical second one for OTA) is a real correctness risk the moment
+their usage ever overlaps, not just a style preference.
+
+**New `time_service::WifiConnection`** is the extraction: the Wi-Fi
+connect-with-retry-then-give-up state machine that used to live entirely
+inside `SntpTimeProvider` is now its own class, and `SntpTimeProvider`
+itself only owns SNTP-specific sequencing on top of it. It is
+reference-counted (`Acquire()`/`AcquireAsync()` increment, `Release()`
+decrements) rather than assuming exactly one user: the connection is
+brought up on the first acquisition and torn down (`esp_wifi_stop`/
+`deinit`, `esp_netif_destroy`) only once every acquirer has released --
+the mechanism behind "OTA must not permanently keep Wi-Fi enabled after
+completion" that generalizes to *any* number of callers, not just OTA
+specifically, and correctly handles the (currently unlikely, but no
+longer unsafe) case of SNTP and OTA both wanting Wi-Fi at overlapping
+times.
+
+Two acquisition styles, because `SntpTimeProvider` and `OtaManager` have
+different, both pre-existing, threading requirements:
+- `AcquireAsync(on_ready, on_failed)` -- non-blocking, callback-driven.
+  `SntpTimeProvider::Init()` uses this, preserving M9's own explicit
+  design goal ("no dedicated task, no blocking wait" -- Wi-Fi/SNTP must
+  never delay the rest of `App::Run()`'s startup sequence).
+- `Acquire(timeout)` -- blocking, returns whether connected.
+  `OtaManager::CheckForUpdate()`/`StartUpdate()` use this: both were
+  already blocking, synchronous calls (M12.4's own design -- OTA has no
+  background task of its own), so waiting for connectivity inline, the
+  same way they already wait for the HTTPS download itself, changes
+  nothing about their calling contract. This is also literally "wait
+  until networking is ready before starting HTTPS", the milestone's own
+  requirement.
+
+Both styles share one underlying event-driven core (`WIFI_EVENT`/
+`IP_EVENT` handled on the default event loop's own task, exactly as
+before) plus a `FreeRTOS` event group as the cross-task signal both
+styles read: `AcquireAsync()`'s callbacks fire from the event handler
+directly; `Acquire()` is a thin `xEventGroupWaitBits()` wrapper. Neither
+style spawns a task of its own.
+
+**Ownership moved up**: `WifiConnection` (and the `WifiCredentialsProvider`
+it depends on) used to be constructed inside `GroheClient`, purely
+because `SntpTimeProvider` needed them and `SntpTimeProvider` lived
+there. Now that `OtaManager` -- a sibling of `GroheClient`, not something
+it has ever known about -- needs the *same* connection, both moved up to
+`app::App` (the composition root, exactly where every other
+cross-cutting shared resource already lives) and are injected by
+reference into `GroheClient`'s constructor and `OtaManager`'s
+constructor alike -- the identical dependency-injection pattern already
+used one level down (`SntpTimeProvider` never owned
+`WifiCredentialsProvider` either). `GroheClient`'s own BLE/protocol
+behavior -- connection handling, authentication, dispense/stop -- is
+completely unchanged by this; only where one pre-existing, unrelated
+dependency (Wi-Fi, needed solely for SNTP timestamps) is constructed
+moved, from `grohe_client.hpp`'s own member list up to `app.hpp`'s.
+
+```
+app::App
+ |-- time_service::WifiConnection wifi_connection_        (M12.5, new)
+ |     depends on: time_service::LocalWifiCredentialsProvider
+ |
+ |-- grohe_ble::GroheClient grohe_client_{wifi_connection_}
+ |     '-- time_service::SntpTimeProvider time_provider_(wifi_connection_)
+ |
+ '-- ota::OtaManager ota_{wifi_connection_}
+```
+
+`App::Run()` calls `wifi_connection_.Init()` once, early -- before
+`grohe_client_.Init()`, since `GroheClient::Init()` (via
+`SntpTimeProvider::Init()`) is the first thing to actually acquire a
+connection through it.
 
 ## Dispense UI (M11)
 
@@ -894,16 +994,22 @@ buffer untouched, never fabricate a value. `time_provider.hpp` is the only
 and no existing Home Assistant (or other product) integration to source
 time from — `grohe_blue_ble/docs/TODO.md`'s "Milestone 5 — Home Assistant"
 is an unimplemented *future* idea for the *Python* library, not something
-this firmware talks to. `SntpTimeProvider` connects to Wi-Fi once at boot,
-syncs via SNTP, then **fully tears Wi-Fi/lwIP back down** —
-`esp_wifi_stop()`/`esp_wifi_deinit()`/`esp_netif_destroy()` — so Wi-Fi is
-never a runtime dependency for anything else: the dial, BLE, and appliance
-control all keep working exactly as before whether or not this ever
-succeeds. Once synced, `time(nullptr)` keeps advancing correctly for the
-rest of the session from the same tick source used elsewhere in this
-codebase, confirmed on hardware across several dispense/stop commands
-issued tens of seconds apart with monotonically increasing, genuine
-timestamps.
+this firmware talks to. `SntpTimeProvider` acquires Wi-Fi once at boot,
+syncs via SNTP, then releases it again — so Wi-Fi is never a runtime
+dependency for anything else: the dial, BLE, and appliance control all
+keep working exactly as before whether or not this ever succeeds. Once
+synced, `time(nullptr)` keeps advancing correctly for the rest of the
+session from the same tick source used elsewhere in this codebase,
+confirmed on hardware across several dispense/stop commands issued tens
+of seconds apart with monotonically increasing, genuine timestamps.
+(As of M12.5, "acquires"/"releases" is literal: the connect-with-retry
+state machine and the actual `esp_wifi_stop()`/`esp_wifi_deinit()`/
+`esp_netif_destroy()` teardown described in the rest of this section
+moved into a new, shared `time_service::WifiConnection` so
+`ota::OtaManager` could reuse the identical logic instead of running a
+second, independent Wi-Fi session — see "Wi-Fi ownership (M12.5)" above
+for the current design; the reasoning below is preserved as the
+original M9 design record.)
 
 *Entirely event-driven, no dedicated task.* `esp_event`'s default loop
 already runs on its own internal task; Wi-Fi/IP events
@@ -926,7 +1032,8 @@ reasoning already applied to `BleManager::conn_handle_` in M7.
 *Credentials*: `WifiCredentialsProvider`/`LocalWifiCredentialsProvider`
 mirror `grohe_ble`'s `CredentialsProvider`/`LocalCredentialsProvider`
 exactly (gitignored local header + committed `.example`), injected into
-`SntpTimeProvider` by reference rather than owned internally, so a future
+`SntpTimeProvider` by reference rather than owned internally (as of
+M12.5, into `WifiConnection` instead — see above), so a future
 NVS- or Wi-Fi-provisioning-based implementation only requires writing a
 new provider and changing one construction line in `GroheClient`.
 
