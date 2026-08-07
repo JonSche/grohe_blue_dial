@@ -126,31 +126,32 @@ esp_err_t Gc9a01Display::Init() {
   ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_));
   ESP_ERROR_CHECK(esp_lcd_panel_init(panel_));
 
-  // Enclosure revision: the LCD module is now mounted physically rotated
-  // 180 degrees from before (mechanical simplification, not a firmware
-  // choice; supersedes an earlier, now-obsolete 90-degree-clockwise
-  // enclosure revision -- see docs/ARCHITECTURE.md's "Display
-  // orientation" section for the full derivation and revision history).
-  // Configured once, here, entirely at the panel-driver/MADCTL level
-  // (lcd_panel_gc9a01.c's mirror() implementation, already present --
-  // see that file), so LVGL and every widget it renders keep using the
-  // exact same 240x240 logical coordinate space as before; nothing above
-  // this call knows the output is rotated at all.
+  // Enclosure revision: the LCD module is mounted physically rotated 90
+  // degrees from its unrotated baseline (mechanical decision, not a
+  // firmware one) -- see docs/ARCHITECTURE.md's "Display orientation"
+  // section for the full derivation and revision history, including the
+  // now-superseded 180-degree and first-90-degree-attempt configurations
+  // this one replaces. Configured once, here, entirely at the
+  // panel-driver/MADCTL level (lcd_panel_gc9a01.c's
+  // swap_xy()/mirror() implementations, already present -- see that
+  // file), so LVGL and every widget it renders keep using the exact same
+  // 240x240 logical coordinate space as before; nothing above this call
+  // knows the output is rotated at all.
   //
   // The panel's existing confirmed-upright baseline MADCTL is MX=1,
   // MY=0, MV=0 (kInit_36 in gc9a01_vendor_init.cpp -- BGR aside, which
-  // mirror() below doesn't touch) -- not the generic MX=0 textbook
-  // baseline most public MADCTL rotation tables assume. A true 180
-  // degree rotation is a point reflection through the center -- reverse
-  // both the column and row address order -- which, unlike a 90/270
-  // degree rotation, never requires exchanging row and column order at
-  // all (MV/swap_xy()): MV stays exactly whatever it already is, on any
-  // panel, for a clean 180. Reversing *both* mirror bits from this
-  // panel's own baseline (MX=1 -> 0, MY=0 -> 1, keeping MV=0) is what
-  // gives 180 degrees from that specific baseline, not from the generic
-  // MX=0 one -- swap_xy() is deliberately not called at all here,
-  // leaving MV at the vendor init table's own value, since a 180 degree
-  // rotation never requires it on any MADCTL-based panel.
+  // neither call below touches) -- not the generic MX=0 textbook
+  // baseline most public MADCTL rotation tables assume, so this
+  // rotation couldn't be copied from one of those tables. A first
+  // 90-degree candidate, swap_xy(true) + mirror(true, false), was
+  // hardware-confirmed to rotate the correct 90 degrees but in the
+  // wrong direction (needed a further 90 degrees counter-clockwise to
+  // be correct). Per this driver's own MADCTL semantics, the other
+  // 90-degree candidate -- reachable from that same
+  // confirmed-180-degree state (swap_xy(true) + mirror(true, true),
+  // see ARCHITECTURE.md) by flipping MX instead of MY -- is the
+  // opposite rotational direction: swap_xy(true) + mirror(false, true).
+  ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_, true));
   ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, false, true));
 
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));

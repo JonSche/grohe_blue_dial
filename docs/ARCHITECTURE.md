@@ -181,13 +181,12 @@ boot screen with a real dial UI) without touching one another.
 
 ## Display orientation
 
-An enclosure revision mounts the LCD module physically rotated 180
-degrees from before (a mechanical simplification, not a firmware
-decision) — the firmware output has to rotate to match. This
-supersedes an earlier enclosure revision that instead called for a 90°
-clockwise rotation; that attempt's own history is kept below since it's
-what the current 180° derivation is actually built on, not a discarded
-dead end.
+The enclosure mounts the LCD module physically rotated 90 degrees from
+its unrotated baseline (a mechanical decision, not a firmware one) —
+the firmware output has to rotate to match. This is the third and
+verified-correct configuration after two earlier attempts; the full
+history is kept below since each earlier result is what the next
+attempt was actually derived from, not discarded dead ends.
 
 **Configured entirely at the panel-driver level, exactly once**, in
 `Gc9a01Display::Init()` (`components/display/gc9a01_display.cpp`),
@@ -195,50 +194,56 @@ immediately after `esp_lcd_panel_init()` and before
 `esp_lcd_panel_disp_on_off()`:
 
 ```cpp
+ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_, true));
 ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, false, true));
 ```
 
-`esp_lcd_panel_mirror()` is standard `esp_lcd` API
-(`esp_lcd_panel_ops.h`), already implemented in `lcd_panel_gc9a01.c`'s
-`panel_gc9a01_mirror()` (this project's own ported panel driver, see
-"Component map" above). It writes the GC9A01's MADCTL register
-(`LCD_CMD_MADCTL`, the same command `0x36` the vendor init table
-already sets once at boot) with the MX/MY bits — real hardware
-rotation, not a software workaround. No other code changed: LVGL still
-renders into the exact same 240×240 logical coordinate space it always
-has, and every widget, animation, and the boot splash keep the
-coordinates they already had. The panel driver alone is responsible for
-physically placing each pixel LVGL writes at logical `(x, y)` onto the
-correct rotated location on the glass.
+`esp_lcd_panel_swap_xy()`/`esp_lcd_panel_mirror()` are standard
+`esp_lcd` API (`esp_lcd_panel_ops.h`), already implemented in
+`lcd_panel_gc9a01.c`'s `panel_gc9a01_swap_xy()`/`panel_gc9a01_mirror()`
+(this project's own ported panel driver, see "Component map" above).
+Both write the GC9A01's MADCTL register (`LCD_CMD_MADCTL`, the same
+command `0x36` the vendor init table already sets once at boot) with
+the MV/MX/MY bits — real hardware rotation, not a software workaround.
+No other code changed: LVGL still renders into the exact same 240×240
+logical coordinate space it always has (this panel is square, so
+swapping X/Y doesn't even change the resolution LVGL is told about —
+no `lv_display_set_resolution()` call is needed), and every widget,
+animation, and the boot splash keep the coordinates they already had.
+The panel driver alone is responsible for physically placing each
+pixel LVGL writes at logical `(x, y)` onto the correct rotated location
+on the glass.
 
-**`swap_xy()` is deliberately not called at all.** This panel's own
-confirmed-upright baseline MADCTL — set once by the vendor init table
-(`kInit_36` in `gc9a01_vendor_init.cpp`) — is `MX=1, MY=0, MV=0` (plus
-the unrelated `BGR` bit, untouched by `mirror()`). A true 180° rotation
-is a point reflection through the center: reverse both the column and
-row address order. Unlike a 90°/270° rotation, this never requires
-exchanging row and column order (`MV`/`swap_xy()`) on any MADCTL-based
-panel — `MV` stays exactly whatever the vendor init table already set
-it to. Reversing *both* mirror bits from this panel's own baseline
-(`MX: 1 -> 0`, `MY: 0 -> 1`, `MV` untouched) is what gives 180° from
-that specific baseline — not from the generic `MX=0` baseline most
-public MADCTL rotation tables assume, which is why the values here
-aren't simply `mirror(true, true)`.
+**Full revision history**, since this panel's own confirmed-upright
+baseline MADCTL — set once by the vendor init table (`kInit_36` in
+`gc9a01_vendor_init.cpp`) — is `MX=1, MY=0, MV=0` (plus the unrelated
+`BGR` bit, untouched by any of the calls below), not the generic
+`MX=0` baseline most public MADCTL rotation tables assume, so none of
+these values could be copied from one of those tables directly:
 
-**History: the previous, now-superseded 90° clockwise revision.** An
-earlier enclosure design called for a 90° clockwise rotation instead.
-Two attempts were made before that requirement was superseded:
-- First attempt, `swap_xy(true)` + `mirror(true, true)` (`MV=1, MX=1,
-  MY=1`): confirmed on real hardware to produce a clean 180° rotation,
-  not 90°. This is, in hindsight, exactly the useful fact the current
-  180° solution above reuses — it just wasn't recognized as directly
-  applicable until the rotation requirement itself changed from 90° to
-  180°.
-- Second attempt, `swap_xy(true)` + `mirror(true, false)` (`MV=1,
-  MX=1, MY=0`): the best remaining analytical candidate for a genuine
-  90° rotation, derived from the first attempt's result, but never
-  confirmed on hardware before the 90° requirement itself was replaced
-  by the 180° one documented above.
+1. An enclosure revision called for a 90° clockwise rotation.
+   `swap_xy(true)` + `mirror(true, false)` (`MV=1, MX=1, MY=0`) was
+   derived as the best candidate and hardware-confirmed to rotate the
+   correct 90°, but in the wrong direction (counter-clockwise instead
+   of clockwise).
+2. A later enclosure revision instead called for 180°.
+   `swap_xy(true)` + `mirror(true, true)` (`MV=1, MX=1, MY=1`) had
+   already been tried, while chasing (1), and was hardware-confirmed to
+   produce a clean 180° rotation — directly reused here once the
+   requirement changed to 180° for real. `swap_xy()` was then dropped
+   entirely: a true 180° rotation is a point reflection through the
+   center (reverse both the column and row address order), which,
+   unlike a 90°/270° rotation, never requires exchanging row and column
+   order (`MV`/`swap_xy()`) on any MADCTL-based panel. Reversing *both*
+   mirror bits from baseline (`MX: 1 -> 0`, `MY: 0 -> 1`, `MV`
+   untouched) gave `swap_xy(false)` + `mirror(false, true)` for 180°.
+3. The enclosure reverted to the 90° rotation from (1). Hardware
+   feedback on that first 90° attempt was conclusive: correct rotation
+   amount, wrong direction (needed a further 90° counter-clockwise).
+   The opposite-direction 90° candidate, reachable from (2)'s
+   confirmed-180° state by flipping `MX` instead of `MY`, is
+   `swap_xy(true)` + `mirror(false, true)` — the configuration above,
+   and the verified production orientation.
 
 **Encoder behavior is unaffected by any of this, structurally, not just
 in practice.** The rotary encoder is a separate GPIO-ISR quadrature
