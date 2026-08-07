@@ -130,9 +130,9 @@ esp_err_t Gc9a01Display::Init() {
   // degrees from its unrotated baseline (mechanical decision, not a
   // firmware one) -- see docs/ARCHITECTURE.md's "Display orientation"
   // section for the full derivation and revision history, including the
-  // now-superseded 180-degree and first-90-degree-attempt configurations
-  // this one replaces. Configured once, here, entirely at the
-  // panel-driver/MADCTL level (lcd_panel_gc9a01.c's
+  // now-superseded 180-degree and earlier-90-degree-attempt
+  // configurations this one replaces. Configured once, here, entirely
+  // at the panel-driver/MADCTL level (lcd_panel_gc9a01.c's
   // swap_xy()/mirror() implementations, already present -- see that
   // file), so LVGL and every widget it renders keep using the exact same
   // 240x240 logical coordinate space as before; nothing above this call
@@ -141,18 +141,20 @@ esp_err_t Gc9a01Display::Init() {
   // The panel's existing confirmed-upright baseline MADCTL is MX=1,
   // MY=0, MV=0 (kInit_36 in gc9a01_vendor_init.cpp -- BGR aside, which
   // neither call below touches) -- not the generic MX=0 textbook
-  // baseline most public MADCTL rotation tables assume, so this
-  // rotation couldn't be copied from one of those tables. A first
-  // 90-degree candidate, swap_xy(true) + mirror(true, false), was
-  // hardware-confirmed to rotate the correct 90 degrees but in the
-  // wrong direction (needed a further 90 degrees counter-clockwise to
-  // be correct). Per this driver's own MADCTL semantics, the other
-  // 90-degree candidate -- reachable from that same
-  // confirmed-180-degree state (swap_xy(true) + mirror(true, true),
-  // see ARCHITECTURE.md) by flipping MX instead of MY -- is the
-  // opposite rotational direction: swap_xy(true) + mirror(false, true).
+  // baseline most public MADCTL rotation tables assume, so none of
+  // these values could be copied from a generic table. swap_xy(true)
+  // (below) is held fixed -- confirmed correct on hardware, both here
+  // and for the two other now-superseded configurations that also used
+  // it -- and out of the 4 possible mirror() pairs with swap_xy(true)
+  // fixed, 3 are already hardware-characterized: (true, true) is a
+  // clean 180 degrees; (true, false) is the correct 90 degrees but the
+  // wrong rotational direction; (false, true) was the correct 90
+  // degrees in the correct direction, but horizontally mirrored (text
+  // only readable as a mirror image). The one remaining untested pair,
+  // (false, false), is what removes that mirroring while keeping the
+  // same swap_xy(true)-driven rotation.
   ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_, true));
-  ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, false, true));
+  ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, false, false));
 
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));
 

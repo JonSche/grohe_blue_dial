@@ -183,10 +183,10 @@ boot screen with a real dial UI) without touching one another.
 
 The enclosure mounts the LCD module physically rotated 90 degrees from
 its unrotated baseline (a mechanical decision, not a firmware one) —
-the firmware output has to rotate to match. This is the third and
-verified-correct configuration after two earlier attempts; the full
-history is kept below since each earlier result is what the next
-attempt was actually derived from, not discarded dead ends.
+the firmware output has to rotate to match. This is the fourth
+configuration after three earlier attempts; the full history is kept
+below since each earlier result is what the next attempt was actually
+derived from, not discarded dead ends.
 
 **Configured entirely at the panel-driver level, exactly once**, in
 `Gc9a01Display::Init()` (`components/display/gc9a01_display.cpp`),
@@ -195,7 +195,7 @@ immediately after `esp_lcd_panel_init()` and before
 
 ```cpp
 ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_, true));
-ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, false, true));
+ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, false, false));
 ```
 
 `esp_lcd_panel_swap_xy()`/`esp_lcd_panel_mirror()` are standard
@@ -242,8 +242,16 @@ these values could be copied from one of those tables directly:
    amount, wrong direction (needed a further 90° counter-clockwise).
    The opposite-direction 90° candidate, reachable from (2)'s
    confirmed-180° state by flipping `MX` instead of `MY`, is
-   `swap_xy(true)` + `mirror(false, true)` — the configuration above,
-   and the verified production orientation.
+   `swap_xy(true)` + `mirror(false, true)` (`MV=1, MX=0, MY=1`) — and
+   was hardware-confirmed to be the correct rotation amount *and*
+   direction, but horizontally mirrored (text only readable as a
+   mirror image).
+4. With `swap_xy(true)` held fixed throughout (three of its four
+   possible `mirror()` pairings now hardware-characterized: `(true,
+   true)` is 180°; `(true, false)` is 90° the wrong direction; `(false,
+   true)` is 90° the right direction but mirrored), the one remaining
+   untested pairing, `mirror(false, false)` — the configuration above —
+   is what removes that mirroring while keeping the same rotation.
 
 **Encoder behavior is unaffected by any of this, structurally, not just
 in practice.** The rotary encoder is a separate GPIO-ISR quadrature
