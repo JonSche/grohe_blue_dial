@@ -5,6 +5,8 @@
 [![Platform](https://img.shields.io/badge/platform-ESP32--C3-blue)](https://www.espressif.com/en/products/socs/esp32-c3)
 [![Status](https://img.shields.io/badge/status-active%20development-yellow)](docs/ROADMAP.md)
 
+![Grohe Dial](docs/images/hero_shot.png)
+
 A small, round, physical dial that controls a [GROHE Blue](https://www.grohe.com/) Home
 water appliance over Bluetooth Low Energy — rotate to choose an amount, press
 to pour.
