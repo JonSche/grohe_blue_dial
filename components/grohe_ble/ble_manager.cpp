@@ -585,7 +585,17 @@ void BleManager::HandleDiscReport(const struct ble_gap_disc_desc& disc) {
   FormatHex(fields.svc_data_uuid128, fields.svc_data_uuid128_len, svc_data,
             sizeof(svc_data));
 
-  ESP_LOGI(kTag,
+  // DEBUG, not INFO: every scan sees advertisements from every nearby BLE
+  // device, not just the appliance -- at INFO this drowned out the
+  // lifecycle events (scan started, device found, connect, MTU, discovery,
+  // subscribe, disconnect) that actually matter for diagnosing a session.
+  // Raise this tag's own runtime level to ESP_LOG_DEBUG (and, since this
+  // project's sdkconfig ties CONFIG_LOG_MAXIMUM_LEVEL to
+  // CONFIG_LOG_DEFAULT_LEVEL, the log verbosity in menuconfig needs to be
+  // at Debug or above for an ESP_LOGD() call to compile in at all) to get
+  // this back -- the standard ESP-IDF per-tag log-level mechanism, not a
+  // new one.
+  ESP_LOGD(kTag,
            "adv addr=%s type=%s rssi=%d pdu=%s name='%s' uuids=[%s] mfg=%s "
            "svcdata128=%s",
            addr_str, AddrTypeToString(disc.addr.type), disc.rssi,
