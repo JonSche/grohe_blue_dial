@@ -1,6 +1,7 @@
 #include "time_service/wifi_connection.hpp"
 
 #include <cstdio>
+#include <cstring>
 
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -122,6 +123,147 @@ const char* WifiAuthModeToString(wifi_auth_mode_t mode) {
     default: return "UNKNOWN";
   }
 }
+
+// Diagnostic-only: symbolic name for wifi_mode_t.
+const char* WifiModeToString(wifi_mode_t mode) {
+  switch (mode) {
+    case WIFI_MODE_NULL: return "WIFI_MODE_NULL";
+    case WIFI_MODE_STA: return "WIFI_MODE_STA";
+    case WIFI_MODE_AP: return "WIFI_MODE_AP";
+    case WIFI_MODE_APSTA: return "WIFI_MODE_APSTA";
+    case WIFI_MODE_NAN: return "WIFI_MODE_NAN";
+    default: return "UNKNOWN";
+  }
+}
+
+// Diagnostic-only: symbolic name for wifi_scan_method_t, logged alongside
+// the STA config this class builds (see StartConnecting()).
+const char* WifiScanMethodToString(wifi_scan_method_t method) {
+  switch (method) {
+    case WIFI_FAST_SCAN: return "WIFI_FAST_SCAN";
+    case WIFI_ALL_CHANNEL_SCAN: return "WIFI_ALL_CHANNEL_SCAN";
+    default: return "UNKNOWN";
+  }
+}
+
+// Diagnostic-only: symbolic name for wifi_bandwidth_t.
+const char* WifiBandwidthToString(wifi_bandwidth_t bw) {
+  switch (bw) {
+    case WIFI_BW_HT20: return "WIFI_BW_HT20 (20MHz)";
+    case WIFI_BW_HT40: return "WIFI_BW_HT40 (40MHz)";
+    case WIFI_BW80: return "WIFI_BW80 (80MHz)";
+    case WIFI_BW160: return "WIFI_BW160 (160MHz)";
+    case WIFI_BW80_BW80: return "WIFI_BW80_BW80 (80+80MHz)";
+    default: return "UNKNOWN";
+  }
+}
+
+// Diagnostic-only: WIFI_PROTOCOL_* bits (esp_wifi_types_generic.h) decoded
+// into their standard names, space-separated -- "protocol bitmap" is
+// otherwise just an opaque number.
+void FormatWifiProtocolBitmap(uint8_t bitmap, char* out, size_t out_size) {
+  struct Flag {
+    uint8_t bit;
+    const char* name;
+  };
+  static constexpr Flag kFlags[] = {
+      {WIFI_PROTOCOL_11B, "11B"},   {WIFI_PROTOCOL_11G, "11G"},
+      {WIFI_PROTOCOL_11N, "11N"},   {WIFI_PROTOCOL_LR, "LR"},
+      {WIFI_PROTOCOL_11A, "11A"},   {WIFI_PROTOCOL_11AC, "11AC"},
+      {WIFI_PROTOCOL_11AX, "11AX"},
+  };
+  size_t pos = 0;
+  for (const auto& flag : kFlags) {
+    if ((bitmap & flag.bit) == 0) {
+      continue;
+    }
+    const size_t len = std::strlen(flag.name);
+    const size_t separator = pos > 0 ? 1 : 0;
+    if (pos + separator + len + 1 > out_size) {
+      break;
+    }
+    if (separator != 0) {
+      out[pos++] = ' ';
+    }
+    std::memcpy(out + pos, flag.name, len);
+    pos += len;
+  }
+  out[pos] = '\0';
+}
+
+// [driver]: read straight from the ESP-IDF driver right after
+// esp_wifi_init() succeeds (see StartConnecting()) -- state that exists
+// independent of anything this class configures itself, useful to confirm
+// the driver actually came up in the state expected before this class
+// hands it any of its own configuration. Every query is individually
+// error-checked and logged as unavailable rather than skipped/asserted,
+// since some (bandwidth, protocol) are only meaningful once the interface
+// mode is set, which happens later in StartConnecting().
+void LogDriverStateAfterInit(esp_netif_t* sta_netif) {
+  uint8_t mac[6] = {};
+  esp_err_t err = esp_wifi_get_mac(WIFI_IF_STA, mac);
+  if (err == ESP_OK) {
+    ESP_LOGI(kTag, "[driver] MAC: %02x:%02x:%02x:%02x:%02x:%02x", mac[0],
+             mac[1], mac[2], mac[3], mac[4], mac[5]);
+  } else {
+    ESP_LOGW(kTag, "[driver] esp_wifi_get_mac failed: %s",
+             esp_err_to_name(err));
+  }
+
+  wifi_country_t country = {};
+  err = esp_wifi_get_country(&country);
+  if (err == ESP_OK) {
+    ESP_LOGI(kTag,
+             "[driver] country: cc=%.3s start_channel=%u num_channels=%u "
+             "max_tx_power=%d policy=%d",
+             country.cc, country.schan, country.nchan, country.max_tx_power,
+             country.policy);
+  } else {
+    ESP_LOGW(kTag, "[driver] esp_wifi_get_country failed: %s",
+             esp_err_to_name(err));
+  }
+
+  const char* hostname = nullptr;
+  err = esp_netif_get_hostname(sta_netif, &hostname);
+  if (err == ESP_OK) {
+    ESP_LOGI(kTag, "[driver] hostname: %s", hostname != nullptr ? hostname : "(null)");
+  } else {
+    ESP_LOGW(kTag, "[driver] esp_netif_get_hostname failed: %s",
+             esp_err_to_name(err));
+  }
+
+  wifi_bandwidth_t bw;
+  err = esp_wifi_get_bandwidth(WIFI_IF_STA, &bw);
+  if (err == ESP_OK) {
+    ESP_LOGI(kTag, "[driver] bandwidth: %s", WifiBandwidthToString(bw));
+  } else {
+    ESP_LOGW(kTag,
+             "[driver] esp_wifi_get_bandwidth failed: %s (expected before "
+             "esp_wifi_set_mode())",
+             esp_err_to_name(err));
+  }
+
+  uint8_t protocol_bitmap = 0;
+  err = esp_wifi_get_protocol(WIFI_IF_STA, &protocol_bitmap);
+  if (err == ESP_OK) {
+    char protocol_str[48];
+    FormatWifiProtocolBitmap(protocol_bitmap, protocol_str, sizeof(protocol_str));
+    ESP_LOGI(kTag, "[driver] protocol: 0x%02x (%s)", protocol_bitmap,
+             protocol_str);
+  } else {
+    ESP_LOGW(kTag,
+             "[driver] esp_wifi_get_protocol failed: %s (expected before "
+             "esp_wifi_set_mode())",
+             esp_err_to_name(err));
+  }
+
+  // [config]: this class never calls esp_wifi_set_storage() itself, so
+  // whatever ESP-IDF's own default is applies -- there is no
+  // esp_wifi_get_storage() to read it back from the driver.
+  ESP_LOGI(kTag,
+           "[config] storage_mode: not set explicitly by this class "
+           "(ESP-IDF default applies)");
+}
 }  // namespace
 
 WifiConnection* WifiConnection::instance_ = nullptr;
@@ -204,6 +346,7 @@ esp_err_t WifiConnection::StartConnecting() {
     xEventGroupSetBits(events_, kFailedBit);
     return err;
   }
+  LogDriverStateAfterInit(sta_netif_);
 
   const WifiCredentials& creds = wifi_credentials_.Get();
   wifi_config_t wifi_config = {};
@@ -218,12 +361,50 @@ esp_err_t WifiConnection::StartConnecting() {
     xEventGroupSetBits(events_, kFailedBit);
     return err;
   }
+
+  // [config]: exactly what this class is about to hand the driver -- see
+  // the header comment on wifi_credentials_ for why threshold/pmf_cfg are
+  // left at their zero-initialized defaults (never set explicitly by this
+  // class) rather than fabricated here.
+  ESP_LOGI(kTag,
+           "[config] Configuring Wi-Fi: SSID=\"%s\" password_len=%u "
+           "scan_method=%s auth_threshold=%s pmf_required=%d pmf_capable=%d",
+           reinterpret_cast<const char*>(wifi_config.sta.ssid),
+           static_cast<unsigned>(std::strlen(creds.password)),
+           WifiScanMethodToString(wifi_config.sta.scan_method),
+           WifiAuthModeToString(wifi_config.sta.threshold.authmode),
+           wifi_config.sta.pmf_cfg.required, wifi_config.sta.pmf_cfg.capable);
+
   err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
   if (err != ESP_OK) {
     ESP_LOGE(kTag, "esp_wifi_set_config failed: %s", esp_err_to_name(err));
     xEventGroupSetBits(events_, kFailedBit);
     return err;
   }
+
+  // [driver]: read back what the driver actually now holds, to catch any
+  // truncation/normalization esp_wifi_set_config() might have applied --
+  // same fields as the [config] log above, for direct comparison.
+  {
+    wifi_config_t readback = {};
+    const esp_err_t get_err = esp_wifi_get_config(WIFI_IF_STA, &readback);
+    if (get_err == ESP_OK) {
+      ESP_LOGI(kTag,
+               "[driver] esp_wifi_get_config: SSID=\"%s\" password_len=%u "
+               "scan_method=%s auth_threshold=%s pmf_required=%d "
+               "pmf_capable=%d",
+               reinterpret_cast<const char*>(readback.sta.ssid),
+               static_cast<unsigned>(
+                   std::strlen(reinterpret_cast<const char*>(readback.sta.password))),
+               WifiScanMethodToString(readback.sta.scan_method),
+               WifiAuthModeToString(readback.sta.threshold.authmode),
+               readback.sta.pmf_cfg.required, readback.sta.pmf_cfg.capable);
+    } else {
+      ESP_LOGW(kTag, "[driver] esp_wifi_get_config failed: %s",
+               esp_err_to_name(get_err));
+    }
+  }
+
   err = esp_wifi_start();
   if (err != ESP_OK) {
     ESP_LOGE(kTag, "esp_wifi_start failed: %s", esp_err_to_name(err));
@@ -246,6 +427,8 @@ void WifiConnection::AcquireAsync(std::function<void()> on_ready,
   if (prev == 0) {
     retry_count_ = 0;
     sta_connected_ = false;
+    bssid_established_ = false;
+    last_authmode_ = WIFI_AUTH_OPEN;
     // Clearing here, not in Release(), matters: see the top-of-file
     // comment for why this is what actually starts a fresh cycle clean,
     // and why a stale event from the *previous* cycle's teardown is
@@ -301,6 +484,8 @@ bool WifiConnection::Acquire(TickType_t timeout) {
   if (prev == 0) {
     retry_count_ = 0;
     sta_connected_ = false;
+    bssid_established_ = false;
+    last_authmode_ = WIFI_AUTH_OPEN;
     xEventGroupClearBits(events_, kConnectedBit | kFailedBit);
     if (StartConnecting() != ESP_OK) {
       return false;  // kFailedBit already set by StartConnecting() itself.
@@ -342,6 +527,35 @@ void WifiConnection::OnWifiOrIpEvent(void* /*arg*/, esp_event_base_t base,
 }
 
 void WifiConnection::TryConnect() {
+  // [driver]/[config] state immediately before esp_wifi_connect() -- see
+  // requirement 3 of the diagnostics this was added for. "Wi-Fi already
+  // started" isn't a queryable driver flag (no esp_wifi_is_started()
+  // exists); it's [config] here because it's derived from this class's own
+  // structure instead -- TryConnect() is only ever reached from
+  // HandleWifiOrIpEvent()'s WIFI_EVENT_STA_START/STA_DISCONNECTED branches,
+  // both of which cannot fire until esp_wifi_start() has already returned
+  // ESP_OK (see StartConnecting()), so it is unconditionally true here.
+  {
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    const esp_err_t mode_err = esp_wifi_get_mode(&mode);
+    uint8_t primary_channel = 0;
+    wifi_second_chan_t second_channel = WIFI_SECOND_CHAN_NONE;
+    const esp_err_t channel_err =
+        esp_wifi_get_channel(&primary_channel, &second_channel);
+    char channel_str[16];
+    if (channel_err == ESP_OK) {
+      std::snprintf(channel_str, sizeof(channel_str), "%u", primary_channel);
+    } else {
+      std::snprintf(channel_str, sizeof(channel_str), "unknown");
+    }
+    ESP_LOGI(kTag, "[driver] before esp_wifi_connect: mode=%s channel=%s",
+             mode_err == ESP_OK ? WifiModeToString(mode) : "unknown",
+             channel_str);
+    ESP_LOGI(kTag,
+             "[config] before esp_wifi_connect: storage_mode=default "
+             "(never set explicitly) wifi_already_started=true");
+  }
+
   // esp_wifi_connect() can fail *synchronously* (e.g. ESP_ERR_WIFI_SSID
   // for an empty/invalid SSID) without ever firing
   // WIFI_EVENT_STA_DISCONNECTED -- treated as an immediate give-up, not
@@ -401,17 +615,32 @@ void WifiConnection::HandleWifiOrIpEvent(esp_event_base_t base, int32_t id,
     const auto* connected_data =
         static_cast<const wifi_event_sta_connected_t*>(data);
     ESP_LOGI(kTag,
-             "Wi-Fi associated; waiting for IP: bssid=%02x:%02x:%02x:%02x:%02x:%02x "
-             "channel=%d authmode=%d (%s)",
+             "[event] Wi-Fi associated; waiting for IP: ssid=\"%.*s\" "
+             "bssid=%02x:%02x:%02x:%02x:%02x:%02x channel=%d authmode=%d (%s)",
+             connected_data->ssid_len,
+             reinterpret_cast<const char*>(connected_data->ssid),
              connected_data->bssid[0], connected_data->bssid[1],
              connected_data->bssid[2], connected_data->bssid[3],
              connected_data->bssid[4], connected_data->bssid[5],
              connected_data->channel, connected_data->authmode,
              WifiAuthModeToString(connected_data->authmode));
     sta_connected_ = true;
+    bssid_established_ = true;
+    last_authmode_ = connected_data->authmode;
   } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
     const auto* disconnected_data =
         static_cast<const wifi_event_sta_disconnected_t*>(data);
+    // Additional disconnect context, kept as its own line so the existing
+    // "Wi-Fi disconnected: reason=..." line below is untouched. rssi/bssid
+    // come straight off the event itself ([event]); prior_authmode/
+    // prior_bssid_established are this class's own memory of the most
+    // recent WIFI_EVENT_STA_CONNECTED this cycle, since the disconnect
+    // event carries no auth mode of its own.
+    ESP_LOGI(kTag,
+             "[event] disconnect context: prior_bssid_established=%d "
+             "prior_authmode=%s rssi=%d",
+             bssid_established_, WifiAuthModeToString(last_authmode_),
+             disconnected_data->rssi);
     sta_connected_ = false;
     if (retry_count_ < kMaxWifiRetries) {
       ++retry_count_;
@@ -445,11 +674,38 @@ void WifiConnection::HandleWifiOrIpEvent(esp_event_base_t base, int32_t id,
     }
     const auto* got_ip_data = static_cast<const ip_event_got_ip_t*>(data);
     ESP_LOGI(kTag,
-             "Wi-Fi connected (associated + IP acquired): ip=" IPSTR
+             "[event] Wi-Fi connected (associated + IP acquired): ip=" IPSTR
              " gw=" IPSTR " netmask=" IPSTR,
              IP2STR(&got_ip_data->ip_info.ip),
              IP2STR(&got_ip_data->ip_info.gw),
              IP2STR(&got_ip_data->ip_info.netmask));
+
+    // [driver]: DNS is not part of ip_event_got_ip_t itself -- it's a
+    // separate esp_netif query, unlike ip/gw/netmask above.
+    esp_netif_dns_info_t dns_main = {};
+    esp_netif_dns_info_t dns_backup = {};
+    const esp_err_t dns_main_err =
+        esp_netif_get_dns_info(sta_netif_, ESP_NETIF_DNS_MAIN, &dns_main);
+    const esp_err_t dns_backup_err =
+        esp_netif_get_dns_info(sta_netif_, ESP_NETIF_DNS_BACKUP, &dns_backup);
+    char dns_main_str[40];
+    if (dns_main_err == ESP_OK) {
+      std::snprintf(dns_main_str, sizeof(dns_main_str), IPSTR,
+                    IP2STR(&dns_main.ip.u_addr.ip4));
+    } else {
+      std::snprintf(dns_main_str, sizeof(dns_main_str), "unavailable (%s)",
+                    esp_err_to_name(dns_main_err));
+    }
+    char dns_backup_str[40];
+    if (dns_backup_err == ESP_OK) {
+      std::snprintf(dns_backup_str, sizeof(dns_backup_str), IPSTR,
+                    IP2STR(&dns_backup.ip.u_addr.ip4));
+    } else {
+      std::snprintf(dns_backup_str, sizeof(dns_backup_str), "unavailable (%s)",
+                    esp_err_to_name(dns_backup_err));
+    }
+    ESP_LOGI(kTag, "[driver] DNS: main=%s backup=%s", dns_main_str,
+             dns_backup_str);
     Resolve(true);
   }
 }

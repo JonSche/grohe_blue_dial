@@ -6,6 +6,7 @@
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_netif_types.h"
+#include "esp_wifi_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "time_service/wifi_credentials.hpp"
@@ -150,6 +151,13 @@ class WifiConnection {
   // AcquireAsync() above. Not an event-group bit of its own: nothing
   // outside this class needs to wait on association alone.
   bool sta_connected_ = false;
+  // Diagnostic-only, both reset alongside retry_count_/sta_connected_ at
+  // the start of each cycle: what the most recent WIFI_EVENT_STA_CONNECTED
+  // this cycle reported, if any, so a later WIFI_EVENT_STA_DISCONNECTED's
+  // own log can show "what we were associated with" instead of nothing --
+  // the disconnected event itself carries no auth mode.
+  bool bssid_established_ = false;
+  wifi_auth_mode_t last_authmode_ = WIFI_AUTH_OPEN;
   std::function<void()> pending_ready_;
   std::function<void()> pending_failed_;
 
