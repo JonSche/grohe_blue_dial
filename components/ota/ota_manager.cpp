@@ -1,14 +1,20 @@
 #include "ota/ota_manager.hpp"
 
 #include <cstring>
+#include <utility>
 
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_https_ota.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_wifi.h"
 #include "firmware_info/firmware_info.hpp"
 #include "time_service/wifi_connection.hpp"
+
+#ifdef CONFIG_HEAP_TASK_TRACKING
+#include "esp_heap_task_info.h"
+#endif
 
 namespace ota {
 namespace {
@@ -40,6 +46,120 @@ class WifiGuard {
  private:
   time_service::WifiConnection& wifi_;
 };
+
+// Diagnostic-only, added to investigate MBEDTLS_ERR_SSL_ALLOC_FAILED
+// (-0x7F00) failures inside esp_https_ota_begin() -- see the ESP-IDF-side
+// mbedtls_ssl_setup() instrumentation (patches/esp_tls_mbedtls_diagnostics
+// .patch) that first showed free=25648 largest_free_block=9216 for a
+// single ~16KB allocation: plenty of *aggregate* free heap, not enough in
+// one contiguous block. This dumps everything available from application
+// code to explain the *why* behind that gap -- purely additive logging,
+// no control flow here affects CheckForUpdate()/StartUpdate() at all.
+void LogHeapDiagnosticsBeforeOta() {
+  ESP_LOGW(kTag, "[heap] ---- diagnostics before esp_https_ota_begin() ----");
+
+  multi_heap_info_t info = {};
+  heap_caps_get_info(&info, MALLOC_CAP_INTERNAL);
+  ESP_LOGW(kTag,
+           "[heap] MALLOC_CAP_INTERNAL summary: free=%u largest_free_block=%u "
+           "min_free_ever=%u allocated_blocks=%u free_blocks=%u "
+           "total_allocated=%u",
+           static_cast<unsigned>(info.total_free_bytes),
+           static_cast<unsigned>(info.largest_free_block),
+           static_cast<unsigned>(info.minimum_free_bytes),
+           static_cast<unsigned>(info.allocated_blocks),
+           static_cast<unsigned>(info.free_blocks),
+           static_cast<unsigned>(info.total_allocated_bytes));
+
+  // Per-region breakdown (region base/size, free/largest-free per region,
+  // block counts) -- ESP-IDF's own standard diagnostic, printed directly
+  // (not through ESP_LOGx -- see its own documentation).
+  heap_caps_print_heap_info(MALLOC_CAP_INTERNAL);
+
+#ifdef CONFIG_HEAP_TASK_TRACKING
+  // Per-task attribution -- the closest thing to "owned by LVGL/NimBLE/
+  // application" available without full heap tracing: each of those
+  // subsystems runs on its own identifiable task ("lvgl", "nimble_host",
+  // "main" for this app's own App::Run() loop -- see gc9a01_display.cpp
+  // and nimble_port_freertos_init() for where those names come from).
+  // Static, not stack-local: heap_task_block_t/heap_task_totals_t arrays
+  // sized for this are too large to put on any task's stack.
+  {
+    constexpr size_t kMaxTasks = 24;
+    constexpr size_t kMaxBlocks = 128;
+    static heap_task_totals_t totals[kMaxTasks];
+    static heap_task_block_t blocks[kMaxBlocks];
+    size_t num_totals = 0;
+
+    heap_task_info_params_t params = {};
+    params.caps[0] = MALLOC_CAP_INTERNAL;
+    params.mask[0] = MALLOC_CAP_INTERNAL;
+    params.tasks = nullptr;  // All tasks.
+    params.num_tasks = 0;
+    params.totals = totals;
+    params.num_totals = &num_totals;
+    params.max_totals = kMaxTasks;
+    params.blocks = blocks;
+    params.max_blocks = kMaxBlocks;
+
+    const size_t num_blocks = heap_caps_get_per_task_info(&params);
+
+    ESP_LOGW(kTag, "[heap] per-task MALLOC_CAP_INTERNAL totals (%u tasks):",
+             static_cast<unsigned>(num_totals));
+    for (size_t i = 0; i < num_totals; ++i) {
+      const char* task_name = totals[i].task != nullptr
+                                  ? pcTaskGetName(totals[i].task)
+                                  : "(pre-scheduler)";
+      ESP_LOGW(kTag, "[heap]   task=\"%s\" bytes=%u blocks=%u", task_name,
+               static_cast<unsigned>(totals[i].size[0]),
+               static_cast<unsigned>(totals[i].count[0]));
+    }
+
+    // Largest individual allocations, not just per-task totals -- a
+    // simple partial selection sort over a small, bounded array (at most
+    // kMaxBlocks entries, a one-off diagnostic dump, not a hot path).
+    constexpr size_t kTopN = 10;
+    ESP_LOGW(kTag, "[heap] largest %u individual allocations (of %u captured):",
+             static_cast<unsigned>(kTopN < num_blocks ? kTopN : num_blocks),
+             static_cast<unsigned>(num_blocks));
+    for (size_t shown = 0; shown < kTopN && shown < num_blocks; ++shown) {
+      size_t max_idx = shown;
+      for (size_t i = shown + 1; i < num_blocks; ++i) {
+        if (blocks[i].size > blocks[max_idx].size) {
+          max_idx = i;
+        }
+      }
+      if (max_idx != shown) {
+        std::swap(blocks[shown], blocks[max_idx]);
+      }
+      const char* task_name = blocks[shown].task != nullptr
+                                  ? pcTaskGetName(blocks[shown].task)
+                                  : "(pre-scheduler)";
+      ESP_LOGW(kTag, "[heap]   #%u: task=\"%s\" address=%p size=%u",
+               static_cast<unsigned>(shown + 1), task_name,
+               blocks[shown].address,
+               static_cast<unsigned>(blocks[shown].size));
+    }
+  }
+#else
+  ESP_LOGW(kTag,
+           "[heap] per-task/per-allocation breakdown unavailable: "
+           "CONFIG_HEAP_TASK_TRACKING is not enabled (idf.py menuconfig -> "
+           "Component config -> Heap memory debugging -> Enable heap task "
+           "tracking)");
+#endif  // CONFIG_HEAP_TASK_TRACKING
+
+#ifdef CONFIG_GROHE_DEV_FEATURES
+  // Full raw block-by-block dump -- very verbose (one line per live
+  // allocation across the whole heap), so kept behind the same dev-only
+  // gate as the rest of this firmware's developer-only diagnostics (see
+  // main/Kconfig.projbuild) rather than a permanent cost in every build.
+  ESP_LOGW(kTag, "[heap] heap_caps_dump(MALLOC_CAP_INTERNAL) follows (dev build only):");
+  heap_caps_dump(MALLOC_CAP_INTERNAL);
+#endif  // CONFIG_GROHE_DEV_FEATURES
+
+  ESP_LOGW(kTag, "[heap] ---- end diagnostics ----");
+}
 
 // Shared by CheckForUpdate() and StartUpdate() -- both need the exact
 // same connection setup, just take it to a different depth afterward.
@@ -117,6 +237,7 @@ UpdateCheckResult OtaManager::CheckForUpdate(const char* url) {
   const esp_https_ota_config_t ota_config = MakeOtaConfig(http_config);
 
   esp_https_ota_handle_t handle = nullptr;
+  LogHeapDiagnosticsBeforeOta();
   esp_err_t err = esp_https_ota_begin(&ota_config, &handle);
   if (err != ESP_OK) {
     ESP_LOGW(kTag, "CheckForUpdate: esp_https_ota_begin failed: %s",
@@ -167,6 +288,7 @@ esp_err_t OtaManager::StartUpdate(const char* url) {
   const esp_https_ota_config_t ota_config = MakeOtaConfig(http_config);
 
   esp_https_ota_handle_t handle = nullptr;
+  LogHeapDiagnosticsBeforeOta();
   esp_err_t err = esp_https_ota_begin(&ota_config, &handle);
   if (err != ESP_OK) {
     // Covers network failure (host unreachable, DNS, connect timeout)
