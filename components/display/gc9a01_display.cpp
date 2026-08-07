@@ -129,27 +129,34 @@ esp_err_t Gc9a01Display::Init() {
   // Enclosure revision: the LCD module is now mounted physically rotated
   // 90 degrees clockwise (mechanical simplification, not a firmware
   // choice) -- see docs/ARCHITECTURE.md's "Display orientation" section
-  // for the full derivation. Configured once, here, entirely at the
-  // panel-driver/MADCTL level (lcd_panel_gc9a01.c's swap_xy()/mirror()
-  // implementations, both already present -- see that file), so LVGL and
-  // every widget it renders keep using the exact same 240x240 logical
-  // coordinate space as before; nothing above this call knows the output
-  // is rotated at all. Cheap on a 240x240 *square* panel specifically:
-  // swapping X/Y doesn't change the resolution LVGL is told about, so no
-  // lv_display_set_resolution() adjustment is needed either.
+  // for the full derivation and revision history. Configured once, here,
+  // entirely at the panel-driver/MADCTL level (lcd_panel_gc9a01.c's
+  // swap_xy()/mirror() implementations, both already present -- see that
+  // file), so LVGL and every widget it renders keep using the exact same
+  // 240x240 logical coordinate space as before; nothing above this call
+  // knows the output is rotated at all. Cheap on a 240x240 *square* panel
+  // specifically: swapping X/Y doesn't change the resolution LVGL is told
+  // about, so no lv_display_set_resolution() adjustment is needed either.
   //
   // The panel's existing confirmed-upright baseline MADCTL is MX=1,
   // MY=0, MV=0 (kInit_36 in gc9a01_vendor_init.cpp -- BGR aside, which
-  // swap_xy()/mirror() below don't touch). Deriving a 90 degree clockwise
-  // rotation of the *output* from that specific baseline (not a generic
-  // MX=0 textbook baseline) gives swap_xy(true) + mirror(true, true) --
-  // see ARCHITECTURE.md for the coordinate-transform derivation. Still
-  // pending an on-hardware confirmation that this reads as clockwise
-  // (not counter-clockwise) to a human viewer, the same "not yet
-  // verifiable from this environment" caveat every hardware-facing
-  // change in this project carries until it's actually flashed.
+  // swap_xy()/mirror() below don't touch) -- not the generic MX=0
+  // textbook baseline most public MADCTL rotation tables assume, so this
+  // rotation couldn't just be copied from one of those tables.
+  // swap_xy(true) + mirror(true, true) was tried first and confirmed on
+  // hardware to be a clean 180 degree rotation, not 90 -- i.e. two
+  // 90-degree steps from baseline, not one. swap_xy(true) is kept (the
+  // one bit any single-quarter-turn state must share with that 180
+  // state); mirror(true, true) is replaced with mirror(true, false) --
+  // the minimal, single-bit-different neighbor of the confirmed-180
+  // state, and the natural "baseline plus exactly one MV toggle, nothing
+  // else changed" reading of a quarter turn. See ARCHITECTURE.md for the
+  // full reasoning, including the fallback (mirror(false, true) instead)
+  // if this still reads as 90 degrees counter-clockwise rather than
+  // clockwise on real hardware -- not yet re-verified from this
+  // environment (no serial monitor or physical device reachable here).
   ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_, true));
-  ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, true, true));
+  ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, true, false));
 
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));
 

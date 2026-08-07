@@ -192,7 +192,7 @@ immediately after `esp_lcd_panel_init()` and before
 
 ```cpp
 ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_, true));
-ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, true, true));
+ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, true, false));
 ```
 
 `esp_lcd_panel_swap_xy()`/`esp_lcd_panel_mirror()` are standard `esp_lcd`
@@ -211,28 +211,50 @@ they already had. The panel driver alone is responsible for physically
 placing each pixel LVGL writes at logical `(x, y)` onto the correct
 rotated location on the glass.
 
-**Why `swap_xy(true)` + `mirror(true, true)` specifically**: this
-panel's own confirmed-upright baseline MADCTL — set once by the vendor
-init table (`kInit_36` in `gc9a01_vendor_init.cpp`) — is `MX=1, MY=0,
-MV=0` (plus the unrelated `BGR` bit, untouched by either call above).
-That's not the generic MX=0 "textbook" baseline most public MADCTL
-rotation tables assume, so this project's own rotation had to be
-derived from its actual starting point rather than copied from one of
-those tables. Modeling the MADCTL transform as: `MV` swaps
-`(x, y) -> (y, x)`, then `MX` reverses the resulting `x` (`x -> W-1-x`),
-then `MY` reverses the resulting `y` (`y -> H-1-y`) — the standard
-ILI9341/GC9A01-family MADCTL semantics this driver itself implements —
-solving for the bit combination that rotates the *output* of the
-already-confirmed-correct baseline by 90° clockwise gives `MV=1, MX=1,
-MY=1`, i.e. `swap_xy(true)` plus `mirror(true, true)`.
+**Why `swap_xy(true)` + `mirror(true, false)` specifically, and what was
+tried first:** this panel's own confirmed-upright baseline MADCTL — set
+once by the vendor init table (`kInit_36` in `gc9a01_vendor_init.cpp`)
+— is `MX=1, MY=0, MV=0` (plus the unrelated `BGR` bit, untouched by
+either call above). That's not the generic `MX=0` "textbook" baseline
+most public MADCTL rotation tables assume, so this rotation couldn't be
+copied from one of those tables and had to be derived from this panel's
+actual starting point — and the first derivation attempt
+(`swap_xy(true)` + `mirror(true, true)`, i.e. `MV=1, MX=1, MY=1`) was
+wrong: confirmed on real hardware to produce a clean 180° rotation, not
+90°. Two independently-plausible textbook models for how `MV` interacts
+with `MX`/`MY` (whether the two mirror bits keep referring to the same
+physical axis after `MV` swaps rows/columns, or swap roles along with
+it) both predicted that same `(1,1,1)` combination for 90° clockwise —
+and both were wrong in the same way, which means the discrepancy isn't
+a simple role-assignment mixup; this panel's real MADCTL behavior
+doesn't match either textbook model closely enough to trust a purely
+analytical derivation for the `MV=1` states.
 
-**Not yet verified on real hardware from this environment** (no serial
-monitor or physical device reachable here) — specifically, that the
-result reads as *clockwise* rather than counter-clockwise to a human
-viewer once actually flashed. If it turns out reversed, the fix is
-local to these two lines (e.g. `mirror(panel_, false, false)` for the
-other 90° rotation), not a UI or coordinate change anywhere else — the
-whole point of rotating at this layer.
+Given that, the correction relies on the one new fact hardware actually
+confirmed — `MV=1, MX=1, MY=1` is 180°, i.e. *two* quarter turns from
+baseline, not one — plus a structural property of MADCTL rotation
+implementations that holds regardless of which exact convention this
+chip uses: the two states that are a genuine quarter turn (90°/270°)
+away from a baseline share `MV=1` with that baseline's own 180°
+partner, and differ from *each other* by both `MX` and `MY` flipped
+(since 90° and 270° are themselves 180° apart). That leaves exactly two
+candidates for "one quarter turn from baseline": `MV=1, MX=1, MY=0` and
+`MV=1, MX=0, MY=1` — one clockwise, one counter-clockwise, with no
+further reliable way to tell which is which without hardware feedback.
+`MX=1, MY=0` — the minimal change from the confirmed-180 state (flip
+only `MY` back) and simultaneously the minimal change from baseline
+(flip only `MV`) — was chosen as the first candidate to try.
+
+**Not yet re-verified on real hardware from this environment** (no
+serial monitor or physical device reachable here) — specifically,
+whether this second attempt reads as *clockwise* specifically, not just
+"a quarter turn." If it's still backwards (90° counter-clockwise
+instead of clockwise), the fix is the other candidate,
+`mirror(panel_, false, true)` (`MX=0, MY=1`) instead of
+`mirror(panel_, true, false)` — still local to this one line, not a UI
+or coordinate change anywhere else, which remains the whole point of
+rotating at this layer regardless of how many attempts the exact bit
+pattern takes to nail down.
 
 **Encoder behavior is unaffected by any of this, structurally, not just
 in practice.** The rotary encoder is a separate GPIO-ISR quadrature
