@@ -27,12 +27,37 @@
 // trigger are themselves safe to call from any task (matching this exact
 // codebase's own precedent: the original SntpTimeProvider::Init() already
 // called esp_wifi_init()/esp_wifi_start() directly from the app task, not
-// the event loop task). This also holds for two callers racing the same
-// 0->1 (first-acquirer) transition: the event-group bits for a cycle are
-// only ever cleared by the *previous* cycle's Release(), never re-cleared
-// at the start of the next one (see Release()'s own comment), so a
-// caller that loses the race to be "first" can never observe a stale
-// bit left over from an earlier cycle -- it just waits for the fresh one.
+// the event loop task).
+//
+// Stale events from our own teardown: esp_wifi_stop() (called from
+// TearDownWifi(), itself called once ref_count_ drops to 0) posts
+// WIFI_EVENT_STA_DISCONNECTED asynchronously as a normal side effect of
+// stopping an still-associated STA -- exactly like any other WIFI_EVENT.
+// That post can only be *processed* after the current call stack (up
+// through Release()) returns control to the event loop's own dispatch
+// loop, by which point ref_count_ may already be back at 0 with no
+// acquirer holding a connection, or -- much later -- a brand new cycle
+// may be in progress. Either way this event does not belong to any
+// live cycle, and HandleWifiOrIpEvent()'s very first check
+// (ref_count_.load() == 0) is what discards it before it can touch
+// retry_count_, sta_connected_, or the event-group bits -- see that
+// function's own comment. This is why kConnectedBit/kFailedBit are
+// cleared at the *start* of the next Acquire()/AcquireAsync() (below),
+// not at the end of the previous Release(): the ref_count_ check above
+// is what actually keeps a self-inflicted stale event from poisoning
+// the next cycle, not the bits' clear-timing, so there is no benefit to
+// clearing any earlier, and clearing at cycle-start keeps this class's
+// two "first acquirer" branches (Acquire()/AcquireAsync()) the one place
+// a new cycle's state is reset, matching retry_count_/sta_connected_.
+//
+// This also means two callers racing the same 0->1 (first-acquirer)
+// transition -- not reachable in this codebase's real usage: every
+// caller (SntpTimeProvider::Init(), OtaManager's CheckForUpdate()/
+// StartUpdate()) runs on the same app task, never concurrently -- could
+// in theory observe a bit left over from *two* cycles back, since the
+// non-first caller's xEventGroupWaitBits() doesn't wait for the first
+// caller to reach the clear. Documented, not fixed, since there is no
+// real caller to fix it for.
 namespace time_service {
 
 class WifiConnection {
@@ -130,7 +155,10 @@ class WifiConnection {
 
   // The one field genuinely touched from any task: Acquire()/Release()/
   // AcquireAsync() all read-modify-write it to decide "am I the first
-  // one in, the last one out".
+  // one in, the last one out". Also read (not written) from the event
+  // loop task, by HandleWifiOrIpEvent(), as the guard against our own
+  // teardown's stale WIFI_EVENT_STA_DISCONNECTED -- see the top-of-file
+  // comment.
   std::atomic<int> ref_count_{0};
 
   static WifiConnection* instance_;

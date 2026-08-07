@@ -529,6 +529,63 @@ app::App
 `SntpTimeProvider::Init()`) is the first thing to actually acquire a
 connection through it.
 
+### Multi-cycle correctness (hardware-found, post-M12.5)
+
+Two issues surfaced only once real hardware exercised `WifiConnection`
+across more than one acquire/release cycle in a single boot (SNTP at
+startup, then the M12.4 dev OTA hook tens of seconds later) -- something
+no build-time check can catch, since both are about the exact interleaving
+of asynchronous ESP-IDF events across cycles, not compile-time structure.
+
+**"Connected" now strictly means associated *and* has an IP.**
+`HandleWifiOrIpEvent()` previously resolved `kConnectedBit` on
+`IP_EVENT_STA_GOT_IP` alone. ESP-IDF's own contract guarantees
+`WIFI_EVENT_STA_CONNECTED` (L2 association) always precedes `GOT_IP`
+(DHCP only ever starts after association), so this was never technically
+wrong -- but it left the guarantee implicit rather than enforced. A
+private `sta_connected_` flag, set on `STA_CONNECTED` and cleared on
+`STA_DISCONNECTED`, is now a hard precondition `GOT_IP` checks before
+calling `Resolve(true)` -- so a caller that gets `on_ready()`/`Acquire()
+== true` is guaranteed a genuinely usable IP connection, with nothing
+left for `OtaManager` to double-check itself before starting HTTPS.
+
+**A cycle's own teardown can poison the next cycle.** `TearDownWifi()`'s
+`esp_wifi_stop()` posts `WIFI_EVENT_STA_DISCONNECTED` asynchronously
+whenever the STA was still associated -- an ordinary side effect of
+stopping, indistinguishable on the wire from a real disconnect. That
+post can only be processed once the event loop task's own call stack
+(which, for `Release()`, is running the *same* teardown that generated
+it) unwinds back to its dispatch loop -- by which point `ref_count_` is
+already 0 and `esp_wifi_deinit()` has already run. If `HandleWifiOrIpEvent()`
+had no way to recognize this as stale, it would retry via
+`esp_wifi_connect()` against an already-deinitialized driver, fail
+synchronously, and set `kFailedBit` -- with nobody having acquired
+anything. The *next* real `Acquire()`/`AcquireAsync()` call would then
+see that leftover `kFailedBit`, either failing immediately itself or
+(worse) causing its own genuine `WIFI_EVENT_STA_START`/`STA_CONNECTED`/
+`GOT_IP` sequence to be silently discarded by the existing "already
+resolved this cycle" guard, since that guard only checks *whether* a bit
+is set, not *which* cycle set it.
+
+The fix: `HandleWifiOrIpEvent()` now checks `ref_count_.load() == 0`
+*before* anything else. While nobody holds an acquisition, no event can
+be for a live cycle -- it can only be leftover noise from the teardown
+that just dropped `ref_count_` to 0 -- so it's dropped unconditionally,
+before it can touch `retry_count_`, `sta_connected_`, or either bit. This
+is the actual defense; earlier, `kConnectedBit`/`kFailedBit` were instead
+cleared at the *end* of `Release()` specifically to close a different,
+theoretical race (two callers racing the same first-acquisition), but
+doing so removed the incidental protection the original bit-clear timing
+happened to provide against exactly this stale-event case. Bits are
+cleared at the *start* of the next `Acquire()`/`AcquireAsync()` again now
+(matching `retry_count_`/`sta_connected_`'s own reset, in the same
+place) -- clear-timing was never the right tool for this problem, and
+the `ref_count_` guard makes it moot either way. The
+two-callers-racing-first-acquisition case remains exactly as before:
+undesirable in theory, not reachable today (every real caller runs on
+the single app task), and documented rather than solved with a mutex
+this codebase has no actual need for.
+
 ## Dispense UI (M11)
 
 Implements `docs/ui/dispense_animation_mockups.md` (the frozen UI spec)
