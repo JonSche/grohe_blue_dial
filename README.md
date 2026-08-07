@@ -59,8 +59,6 @@ Implemented:
 
 Planned:
 
-- [ ] Simple flashing workflow and helper scripts
-- [ ] JTAG/OpenOCD debugging setup
 - [ ] Optional Home Assistant integration — configuration, diagnostics, and
       appliance status (CO₂, filter, firmware version); never required for
       basic dispensing
@@ -122,10 +120,6 @@ Medium water type is implemented but not yet confirmed on the physical
 appliance. Firmware version/build metadata is implemented and
 build-verified.
 
-Current development focus: developer tooling — a simple flashing workflow
-and JTAG/OpenOCD debugging setup — ahead of the optional Home Assistant
-integration.
-
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the complete, itemized
 milestone history and what's next, and the "v1.0 Release Criteria" section
 at the bottom of it for what "done" means for this project.
@@ -176,18 +170,6 @@ with, endorsed by, or sponsored by GROHE AG.
 **UI concept** *(design mockup, not a live screen capture)*
 
 ![Grohe Dial UI mockup](docs/ui/mockups/hero-mockup.png)
-
-**Hardware**
-
-![Hardware photo — coming soon](docs/images/hardware.jpg)
-
-**Display**
-
-![Display photo — coming soon](docs/images/display.jpg)
-
-**Wiring**
-
-![Wiring diagram — coming soon](docs/images/wiring.jpg)
 
 ## Roadmap
 
