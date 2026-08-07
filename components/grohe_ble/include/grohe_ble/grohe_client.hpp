@@ -47,11 +47,12 @@ struct CommandOutcome {
 class GroheClient {
  public:
   // wifi_connection must outlive this object (dependency injection, not
-  // an owned instance -- as of M12.5, shared with ota::OtaManager, so it
-  // lives at the composition root (app::App) rather than being
-  // constructed internally here; see wifi_connection.hpp's own comment
-  // and docs/ARCHITECTURE.md#wifi-ownership-m125). Forwarded straight
-  // through to time_provider_ -- this class has no other use for it.
+  // an owned instance -- it lives at the composition root (app::App)
+  // rather than being constructed internally here, so any future
+  // consumer could share the exact same connection; see
+  // wifi_connection.hpp's own comment and
+  // docs/ARCHITECTURE.md#wifi-connectivity). Forwarded straight through
+  // to time_provider_ -- this class has no other use for it.
   explicit GroheClient(time_service::WifiConnection& wifi_connection);
 
   esp_err_t Init();
@@ -101,14 +102,13 @@ class GroheClient {
   LocalCredentialsProvider credentials_provider_;
 
   // M9: time_provider_ needs a Wi-Fi connection purely as a one-shot SNTP
-  // time source. As of M12.5 that connection (time_service::
-  // WifiConnection) is injected from outside (the constructor parameter
-  // above) rather than owned here, because ota::OtaManager -- a sibling
-  // of this class, not something it knows about -- needs to share the
+  // time source. That connection (time_service::WifiConnection) is
+  // injected from outside (the constructor parameter above) rather than
+  // owned here, so any future sibling of this class could share the
   // exact same connection rather than run a second, independent one
   // against the one physical Wi-Fi radio this chip has. See
   // wifi_connection.hpp's own comment and
-  // docs/ARCHITECTURE.md#wifi-ownership-m125.
+  // docs/ARCHITECTURE.md#wifi-connectivity.
   time_service::SntpTimeProvider time_provider_;
 
   // Gate for SendCommand(): both become true independently and in no

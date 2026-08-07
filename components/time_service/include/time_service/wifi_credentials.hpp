@@ -2,13 +2,13 @@
 
 // Credentials needed to associate with a Wi-Fi network -- used by
 // WifiConnection (see wifi_connection.hpp), the one place this firmware
-// brings Wi-Fi up, on behalf of both SntpTimeProvider (a one-shot SNTP
-// time source) and ota::OtaManager (HTTPS OTA downloads). Abstracted
-// behind WifiCredentialsProvider, mirroring grohe_ble's Credentials/
-// CredentialsProvider/LocalCredentialsProvider exactly, so a future NVS- or
-// Wi-Fi-provisioning-based implementation only ever requires writing a new
-// WifiCredentialsProvider and constructing it instead of this one --
-// WifiConnection only ever depends on the abstract interface.
+// brings Wi-Fi up, on behalf of SntpTimeProvider (a one-shot SNTP time
+// source). Abstracted behind WifiCredentialsProvider, mirroring
+// grohe_ble's Credentials/CredentialsProvider/LocalCredentialsProvider
+// exactly, so a future NVS- or Wi-Fi-provisioning-based implementation
+// only ever requires writing a new WifiCredentialsProvider and
+// constructing it instead of this one -- WifiConnection only ever
+// depends on the abstract interface.
 namespace time_service {
 
 struct WifiCredentials {

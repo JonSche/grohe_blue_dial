@@ -18,9 +18,9 @@ struct timeval;
 // acquired purely as a one-shot time source, then releases it again --
 // Wi-Fi is never a runtime dependency for anything else in this firmware
 // (the dial keeps working, appliance control included, whether or not this
-// ever succeeds). As of M12.5, the Wi-Fi connection itself is
-// WifiConnection's job (shared with ota::OtaManager -- see that class's own
-// comment); this class owns only the SNTP-specific sequencing on top of it.
+// ever succeeds). The Wi-Fi connection itself is WifiConnection's job --
+// see that class's own comment; this class owns only the SNTP-specific
+// sequencing on top of it.
 // See sntp_time_provider.cpp's own top comment for the full event-driven
 // design (no dedicated task, no blocking wait -- everything reacts to
 // WifiConnection's own callback, SNTP's own sync callback, and a one-shot
@@ -32,8 +32,8 @@ namespace time_service {
 class SntpTimeProvider final : public TimeProvider {
  public:
   // wifi_connection must outlive this object (dependency injection, not an
-  // owned instance -- shared with whoever else needs Wi-Fi, e.g.
-  // ota::OtaManager; see wifi_connection.hpp's own comment).
+  // owned instance -- shared with whoever else might need Wi-Fi in the
+  // future; see wifi_connection.hpp's own comment).
   explicit SntpTimeProvider(WifiConnection& wifi_connection);
   ~SntpTimeProvider() override;
 

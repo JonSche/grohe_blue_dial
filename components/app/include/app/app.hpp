@@ -4,7 +4,6 @@
 #include "display/gc9a01_display.hpp"
 #include "encoder/encoder_input.hpp"
 #include "grohe_ble/grohe_client.hpp"
-#include "ota/ota_manager.hpp"
 #include "time_service/wifi_connection.hpp"
 #include "time_service/wifi_credentials.hpp"
 #include "ui/ui_manager.hpp"
@@ -13,11 +12,8 @@ namespace app {
 
 // Composition root: owns every subsystem and wires them together. This is
 // the one place that knows about all of display/, encoder/, ui/,
-// grohe_ble/, ota/, and (M12.5) time_service/'s Wi-Fi connection, which
-// keeps those components decoupled from each other -- ota:: in particular
-// has no idea any of display/encoder/ui/grohe_ble exist (see
-// ota_manager.hpp's own comment); it and grohe_client_'s own
-// SntpTimeProvider only share time_service::WifiConnection, nothing else.
+// grohe_ble/, and time_service/'s Wi-Fi connection, which keeps those
+// components decoupled from each other.
 //
 // App itself contains no interaction rules: it only polls EncoderInput for
 // events, hands them to DialController, and re-renders UiManager from the
@@ -48,29 +44,23 @@ class App {
   encoder::EncoderInput encoder_input_;
   DialController dial_controller_;
 
-  // M12.5: the one Wi-Fi connection this firmware ever brings up, shared
-  // by grohe_client_'s own SntpTimeProvider (a one-shot SNTP time source)
-  // and ota_ (an HTTPS OTA download) -- neither owns Wi-Fi itself
-  // anymore; both take a reference to this instance instead, exactly the
-  // dependency-injection pattern already used one level down (compare
-  // wifi_credentials_provider_ -> wifi_connection_ here to how
-  // credentials_provider_ -> time_provider_ already worked inside
-  // GroheClient pre-M12.5). Declared before grohe_client_/ota_ so both
-  // can take it by reference in their own constructors (member init order
+  // The one Wi-Fi connection this firmware ever brings up, used by
+  // grohe_client_'s own SntpTimeProvider (a one-shot SNTP time source) --
+  // SntpTimeProvider doesn't own Wi-Fi itself, it takes a reference to
+  // this instance instead, the same dependency-injection pattern already
+  // used one level down (compare wifi_credentials_provider_ ->
+  // wifi_connection_ here to how credentials_provider_ -> time_provider_
+  // already works inside GroheClient). Declared before grohe_client_ so it
+  // can take it by reference in its own constructor (member init order
   // follows declaration order, not the constructor-argument order below).
-  // See docs/ARCHITECTURE.md#wifi-ownership-m125 for the full design.
+  // Reference-counted rather than assuming exactly one consumer -- see
+  // wifi_connection.hpp's own comment -- even though SntpTimeProvider is
+  // currently the only one; a former second consumer (an OTA update
+  // engine) was removed, but the design still holds for any future one.
   time_service::LocalWifiCredentialsProvider wifi_credentials_provider_;
   time_service::WifiConnection wifi_connection_{wifi_credentials_provider_};
 
   grohe_ble::GroheClient grohe_client_{wifi_connection_};
-
-  // M12.4: owned here (the composition root), like every other subsystem,
-  // but Run() only ever calls Init() on it -- CheckForUpdate()/
-  // StartUpdate() have no caller yet in this milestone (no automatic
-  // update checks, no background task; see ota_manager.hpp's own class
-  // comment). A future Home Assistant integration (M13) or a manual
-  // trigger calls them later, through this same instance.
-  ota::OtaManager ota_{wifi_connection_};
 };
 
 }  // namespace app

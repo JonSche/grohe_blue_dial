@@ -39,13 +39,3 @@ CONFIG_BT_NIMBLE_ENABLED=y
 # This firmware only ever talks to one peripheral (the Grohe Blue).
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 CONFIG_BT_NIMBLE_MAX_BONDS=1
-
-# OTA (M12.4): a freshly-flashed OTA image boots in ESP_OTA_IMG_PENDING_
-# VERIFY state; if it crashes, watchdogs, or loses power before
-# ota::OtaManager::Init() confirms it (see app.cpp), the bootloader
-# automatically reverts to the previous working image on the next boot.
-# Not anti-rollback (no monotonic security-version enforcement, no
-# downgrade prevention) -- just the base "a bad update can't brick the
-# dial" guarantee. See CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE's own
-# Kconfig help text.
-CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

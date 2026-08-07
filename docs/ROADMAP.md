@@ -533,10 +533,11 @@ reinitialisation, no LVGL pause, no framebuffer change, only
 Developer- and release-focused tooling -- building, flashing, debugging,
 and shipping this firmware repeatably -- rather than further product
 features. Ordered by development priority, not release priority: reliable
-debugging is worth more than OTA while firmware is still under active
-development. The OTA-ready partition table itself was already delivered
-in M9; this milestone is the OTA *mechanism* on top of it, not a second,
-duplicate migration.
+debugging is worth more than an OTA update mechanism while firmware is
+still under active development. The OTA-ready partition table itself
+was delivered in M9 and remains in place; M12.4 (an OTA mechanism on
+top of it) was built and later fully reverted -- see its own entry
+below.
 
 ### M12.1 — Debugging
 
@@ -588,81 +589,21 @@ design.
       `idf.py monitor` would show, built from the same values already
       confirmed correct via the generated header/build log.
 
-### M12.4 — OTA ✅
+### M12.4 — OTA (reverted)
 
-Completes the deployment foundation started in M9 (the OTA-ready
-partition table) and M12.3 (firmware version metadata) with the OTA
-*mechanism* itself -- no dispensing, BLE, UI, or Home Assistant
-behaviour changed. See
-[ARCHITECTURE.md](ARCHITECTURE.md#ota-m124) for the full design.
-
-- [x] New `components/ota/` (`ota::OtaManager`), independent of BLE, the
-      Grohe protocol, dispensing, `DialController`, and UI -- the only
-      other component it touches is `firmware_info`, read-only, to
-      compare versions. Entirely `esp_https_ota`/`esp_ota_ops`-based; no
-      custom OTA protocol, image format, or flash-write code.
-      `CheckForUpdate(url)` reads only the candidate image's header
-      (no flash write); `StartUpdate(url)` downloads, flashes, verifies,
-      and -- only on success -- reboots into the new image. Both take
-      the update URL as a plain parameter (a configurable HTTPS URL, per
-      this milestone's scope); neither is called automatically anywhere.
-- [x] Version handling reuses M12.3 entirely: both calls compare the
-      candidate image's version against `firmware_info::Version()`
-      (the single place the running version is ever read) with a plain
-      `strncmp()` -- no second version-comparison mechanism anywhere in
-      the project. `StartUpdate()` refuses to proceed if the versions
-      are identical, matching ESP-IDF's own `advanced_https_ota`
-      example.
-- [x] Error handling for network failure, TLS failure, HTTP errors,
-      invalid image, version mismatch, verification failure, and an
-      interrupted download all map directly onto the ESP-IDF call where
-      each one actually surfaces (see ARCHITECTURE.md's table) -- no
-      separate error-classification logic. The running partition is
-      never touched on any failure: `esp_ota_set_boot_partition()` is
-      only ever reached inside a *successful*
-      `esp_https_ota_finish()`, called exactly once, at the very end.
-- [x] Rollback support: `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` enabled
-      (`sdkconfig.defaults`) -- a freshly-flashed image boots pending-
-      verify and automatically reverts to the previous working image if
-      it crashes, watchdogs, or loses power before being confirmed.
-      `OtaManager::Init()`, called once at boot from `App::Run()`,
-      confirms the running image (`esp_ota_mark_app_valid_cancel_
-      rollback()`) unconditionally on every boot -- a safe no-op outside
-      a pending-verify boot.
-- [x] `State()`/`Progress()`/`LastError()` exposed as independent
-      `std::atomic`s (`Idle`/`Checking`/`Downloading`/`Verifying`/
-      `Installing`/`Rebooting`/`Complete`/`Failed`), pollable from a
-      different task than whichever one is blocked inside
-      `StartUpdate()` -- the same pattern already used for
-      `BleManager::conn_handle_`/`SntpTimeProvider::valid_`. No
-      background task of its own anywhere in this component.
-- [x] Verified: clean `idf.py build` with
-      `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` applied; every
-      `OtaState` switch exhaustive; scope diff confirms zero BLE/Grohe-
-      protocol/dispense/`DialController`/UI files touched -- only
-      `app.hpp`/`app.cpp`/`app`'s `CMakeLists.txt` (composition-root
-      wiring: own the instance, call `Init()`) and `sdkconfig.defaults`
-      (the rollback Kconfig) outside the new component itself.
-      **Not yet done from this environment: any on-hardware
-      validation** (update from a real HTTPS image, reboot into it,
-      confirm the new version is reported correctly, confirm the
-      previous image survives a deliberately failed/interrupted update,
-      confirm rollback actually reverts on a simulated crash-before-
-      confirm) -- no physical hardware, network-reachable HTTPS image
-      host, or serial monitor reachable from this environment. This is
-      the same limitation every hardware-dependent milestone before
-      this one has ended on.
-- [x] The manual developer OTA validation hook (5s encoder hold --
-      `app::App::Run()`, `EncoderInput::IsHeldFor()`) is gated behind
-      `CONFIG_GROHE_DEV_FEATURES` (`main/Kconfig.projbuild`), disabled
-      by default and fully compiled out (verified: the default build's
-      image size is identical with the option on vs. the implementation
-      removed entirely) rather than deleted -- kept available for the
-      still-outstanding on-hardware validation above, without shipping
-      an unauthenticated physical-access firmware-update trigger in any
-      normal build. See
-      [ARCHITECTURE.md](ARCHITECTURE.md#ota-m124)'s own "Developer OTA
-      validation hook" section.
+An OTA update mechanism (`components/ota/`, `esp_https_ota`/
+`esp_ota_ops`-based, plus a developer-only manual trigger and bootloader
+rollback) was built, hardware-tested, and then fully removed -- see git
+history for the complete former design if it's ever revisited. Removed
+in full: the `ota` component, the developer validation hook (and its
+supporting `EncoderInput::IsHeldFor()`), `CONFIG_BOOTLOADER_APP_ROLLBACK_
+ENABLE`, and the corresponding `ARCHITECTURE.md` sections. Kept: the
+OTA-ready partition table from M9 (still the current flash layout --
+removing OTA doesn't require a second partition migration) and M12.3's
+firmware version metadata, which OTA had reused but doesn't own.
+`time_service::WifiConnection` (originally extracted so OTA and SNTP
+could share one Wi-Fi session) is also kept -- `SntpTimeProvider` is its
+only consumer now; see [ARCHITECTURE.md](ARCHITECTURE.md#wifi-connectivity).
 
 ## M13 — Home Assistant Integration
 

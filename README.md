@@ -54,14 +54,11 @@ Implemented:
 - [x] SNTP time synchronization (a one-shot Wi-Fi connection at boot; not a
       runtime dependency for anything else)
 - [x] Firmware version/build metadata embedded in every build, logged at boot
-- [x] OTA update engine (`esp_https_ota`-based, from a specified HTTPS URL) —
-      the engine is implemented; nothing calls it automatically yet
 
 Planned:
 
 - [ ] Simple flashing workflow and helper scripts
 - [ ] JTAG/OpenOCD debugging setup
-- [ ] GitHub Releases as the firmware distribution mechanism for OTA
 - [ ] Optional Home Assistant integration — configuration, diagnostics, and
       appliance status (CO₂, filter, firmware version); never required for
       basic dispensing
@@ -108,7 +105,7 @@ whole product. Home Assistant is an optional, separate integration hanging
 off the side, never a dependency of the BLE path.
 
 Internally, the firmware is a small set of single-purpose components (BLE,
-display, encoder, UI, time sync, OTA, ...) wired together by one composition
+display, encoder, UI, time sync, ...) wired together by one composition
 root, with dependencies pointing strictly one way. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full component map,
 the BLE protocol/state-machine writeup, and the reasoning behind every
@@ -120,9 +117,8 @@ The core product is implemented and hardware-validated: BLE pairing/
 reconnect, authenticated dispense/stop (Still and Sparkling), the dial UI,
 SNTP time sync, and display sleep have all been verified on real hardware.
 Medium water type is implemented but not yet confirmed on the physical
-appliance. Firmware versioning and an OTA update engine are implemented and
-build-verified; OTA itself is still awaiting a full on-hardware update/
-rollback validation pass.
+appliance. Firmware version/build metadata is implemented and
+build-verified.
 
 Current development focus: developer tooling — a simple flashing workflow
 and JTAG/OpenOCD debugging setup — ahead of the optional Home Assistant
@@ -150,20 +146,6 @@ Real appliance/Wi-Fi credentials are never committed — copy the two
 `*_local.hpp.example` files under `components/grohe_ble/` and
 `components/time_service/` to their non-`.example` names and fill in your
 own values before building against a real appliance.
-
-## OTA
-
-Firmware updates use ESP-IDF's own `esp_https_ota`/`esp_ota_ops` — no custom
-OTA protocol. The flash layout has been OTA-ready (`ota_0`/`ota_1` +
-`otadata`) since early on, and bootloader-level rollback is enabled: a
-freshly-flashed image that crashes before confirming itself automatically
-reverts to the previous working image on the next boot.
-
-**GitHub Releases** is the intended firmware distribution mechanism — a
-tagged release's attached firmware binary becomes the URL the OTA engine is
-pointed at. That distribution/discovery layer isn't built yet (see
-[Features](#features) above); today the OTA engine takes a plain,
-caller-supplied HTTPS URL.
 
 ## Reverse engineering
 

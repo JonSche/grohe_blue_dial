@@ -470,11 +470,10 @@ bool WifiConnection::Acquire(TickType_t timeout) {
   // straight to xEventGroupWaitBits() below without waiting for this
   // caller to actually reach StartConnecting()/xEventGroupClearBits() --
   // in theory it could then observe a bit left over from *two* cycles
-  // back. This codebase's actual callers (SntpTimeProvider::Init(),
-  // OtaManager's CheckForUpdate()/StartUpdate()) only ever run on the
-  // app task, one at a time, so this isn't reachable today -- documented
-  // for whichever caller relies on it next, not fixed, since there's no
-  // real caller to fix it for.
+  // back. Not reachable today: this blocking overload currently has no
+  // caller at all (SntpTimeProvider, the one real consumer, uses
+  // AcquireAsync() instead) -- documented for whichever caller relies on
+  // it next, not fixed, since there's no real caller to fix it for.
   const int prev = ref_count_.fetch_add(1);
   ESP_LOGI(kTag,
            "Acquire: prev_ref_count=%d new_ref_count=%d "
@@ -664,8 +663,8 @@ void WifiConnection::HandleWifiOrIpEvent(esp_event_base_t base, int32_t id,
     // GOT_IP (DHCP only ever starts after L2 association), so this
     // should never actually fire -- kept as a hard requirement, not just
     // a comment, per the explicit "STA_CONNECTED AND GOT_IP" contract
-    // Acquire()/AcquireAsync() callers rely on: OtaManager in particular
-    // starts HTTPS the instant Acquire() returns success, with no Wi-Fi
+    // Acquire()/AcquireAsync() callers rely on: a caller may start using
+    // the network the instant it gets a positive result, with no Wi-Fi
     // check of its own, so this class -- not its caller -- is the one
     // place that must actually enforce it.
     if (!sta_connected_) {

@@ -35,9 +35,6 @@ Security reports are in scope for:
   implementation ([`components/grohe_ble/`](components/grohe_ble/)) —
   authentication (HMAC/credential handling), payload parsing, and the
   connection state machine.
-- **OTA**: the firmware update mechanism
-  ([`components/ota/`](components/ota/)) — image verification, rollback
-  behavior, and how update sources are handled.
 - **Firmware generally**: memory safety and credential handling anywhere
   else in this firmware's own code — e.g.
   [`components/grohe_ble/`](components/grohe_ble/) (Grohe appliance

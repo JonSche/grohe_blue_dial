@@ -12,14 +12,13 @@
 #include "time_service/wifi_credentials.hpp"
 
 // WifiConnection: the one place this firmware brings the Wi-Fi STA
-// interface up or down. Extracted (M12.5) from what used to be
-// SntpTimeProvider's own private, one-shot connect/retry/teardown state
-// machine, so ota::OtaManager can share the *same* Wi-Fi session instead
-// of running a second, independent connect/retry implementation against
-// the one physical radio this chip has -- see
-// docs/ARCHITECTURE.md#wifi-ownership-m125 for the full design and why a
-// single, reference-counted, reusable connection (not two independent
-// one-shot ones) is the only safe way to share it.
+// interface up or down. Extracted from what used to be SntpTimeProvider's
+// own private, one-shot connect/retry/teardown state machine into a
+// standalone, reference-counted class so any consumer needing Wi-Fi can
+// share the *same* session instead of running a second, independent
+// connect/retry implementation against the one physical radio this chip
+// has -- see docs/ARCHITECTURE.md#wifi-connectivity for the full design.
+// SntpTimeProvider is the only consumer today.
 //
 // Event-driven internally, exactly like the class this was extracted
 // from: no dedicated task; everything reacts to WIFI_EVENT/IP_EVENT on
@@ -52,13 +51,13 @@
 // a new cycle's state is reset, matching retry_count_/sta_connected_.
 //
 // This also means two callers racing the same 0->1 (first-acquirer)
-// transition -- not reachable in this codebase's real usage: every
-// caller (SntpTimeProvider::Init(), OtaManager's CheckForUpdate()/
-// StartUpdate()) runs on the same app task, never concurrently -- could
-// in theory observe a bit left over from *two* cycles back, since the
-// non-first caller's xEventGroupWaitBits() doesn't wait for the first
-// caller to reach the clear. Documented, not fixed, since there is no
-// real caller to fix it for.
+// transition -- not reachable in this codebase's real usage: the one
+// current caller (SntpTimeProvider::Init()) only ever runs on the app
+// task, never concurrently with itself -- could in theory observe a bit
+// left over from *two* cycles back, since the non-first caller's
+// xEventGroupWaitBits() doesn't wait for the first caller to reach the
+// clear. Documented, not fixed, since there is no real caller to fix it
+// for.
 namespace time_service {
 
 class WifiConnection {
@@ -120,8 +119,7 @@ class WifiConnection {
   // released, the Wi-Fi/netif driver is fully torn down (esp_wifi_stop/
   // deinit, esp_netif_destroy) -- symmetric with the bring-up
   // AcquireAsync()/Acquire() triggers, and the concrete mechanism behind
-  // "must not permanently keep Wi-Fi enabled" for every caller, not just
-  // OTA.
+  // "Wi-Fi is never a runtime dependency" for every caller.
   void Release();
 
   [[nodiscard]] bool IsConnected() const;

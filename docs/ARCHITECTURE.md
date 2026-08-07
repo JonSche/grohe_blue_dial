@@ -72,20 +72,10 @@ components/
                dirty, build date/time) -- see "Firmware metadata (M12.3)"
                below. Depends only on esp_app_format; nothing else in this
                project depends on it except app/, which logs it at boot.
-  time_service/ SntpTimeProvider (a one-shot SNTP time source) and, as of
-               M12.5, WifiConnection -- the one place this firmware brings
-               Wi-Fi up or down, shared with ota/ below. See "Wi-Fi
-               ownership (M12.5)" below. No dependency on anything else in
-               this project.
-  ota/         OtaManager: checks for and installs a firmware update from
-               a caller-supplied HTTPS URL (esp_https_ota/esp_ota_ops) --
-               see "OTA (M12.4)"/"Wi-Fi ownership (M12.5)" below. Depends
-               on firmware_info (to read the running version, read-only)
-               and time_service (WifiConnection, shared with
-               SntpTimeProvider -- see below); nothing else depends on it
-               except app/, which owns the instance and calls Init()
-               (rollback confirmation) -- Check/StartUpdate() have no
-               caller yet in this milestone.
+  time_service/ SntpTimeProvider (a one-shot SNTP time source) and
+               WifiConnection -- the one place this firmware brings Wi-Fi
+               up or down. See "Wi-Fi connectivity" below. No dependency
+               on anything else in this project.
 main/          app_main() -> app::App.
 ```
 
@@ -101,10 +91,9 @@ app --> grohe_ble --> (bt/nimble, nvs_flash)
 app --> dial_state
 app --> firmware_info --> (esp_app_format)
 app --> time_service --> (esp_wifi, esp_netif, esp_event, lwip, nvs_flash)
-app --> ota --> firmware_info, time_service, (esp_https_ota, esp_ota_ops/app_update, mbedtls)
-grohe_ble --> time_service  (GroheClient's SntpTimeProvider; M12.5: takes
+grohe_ble --> time_service  (GroheClient's SntpTimeProvider; takes
                              WifiConnection& from app, doesn't construct
-                             it -- see "Wi-Fi ownership (M12.5)")
+                             it -- see "Wi-Fi connectivity")
 ```
 
 `bringup` intentionally duplicates the handful of `esp_lcd`/`esp_lcd_gc9a01`
@@ -296,232 +285,62 @@ before `app_main()` even runs) -- both read from the same underlying
 `esp_app_desc_t`, so there is no duplicated *source*, only a second,
 shorter *rendering* of it for this project's own boot log.
 
-## OTA (M12.4)
+## Wi-Fi connectivity
 
-The deployment foundation's other half: M9 built the OTA-ready partition
-table (`ota_0`/`ota_1`/`otadata`), M12.3 gave every build an identifiable
-version -- this milestone is the OTA *mechanism* itself. Reuses ESP-IDF's
-own `esp_https_ota`/`esp_ota_ops` entirely; no custom OTA protocol, no
-custom image format, no custom flash-write code anywhere in this project.
+**`time_service::WifiConnection`** is the one place this firmware brings
+the Wi-Fi STA interface up or down. Extracted out of what used to be
+`SntpTimeProvider`'s own private, one-shot connect/retry/teardown state
+machine so that any *other* consumer needing Wi-Fi could reuse the same
+session instead of running a second, independent connect/retry
+implementation against the one physical radio this chip has -- an
+experimental OTA update engine was that second consumer for a time (see
+git history around 2026-08 for the full design if it's ever revisited),
+but has since been removed; `SntpTimeProvider` is `WifiConnection`'s only
+consumer today.
 
-**New `components/ota/`, one class, `ota::OtaManager`**, deliberately
-independent of every other subsystem -- no knowledge of BLE, the Grohe
-protocol, dispensing, `DialController`, or UI, matching the exact
-"new concern is a new sibling component" principle already established
-for `grohe_ble`/`time_service`/`firmware_info`. The only other component
-it touches is `firmware_info`, read-only, purely to compare the running
-version against a candidate image's version -- the single place version
-comparison logic exists (see "Version handling" below).
-
-```cpp
-namespace ota {
-enum class OtaState { kIdle, kChecking, kDownloading, kVerifying,
-                       kInstalling, kRebooting, kComplete, kFailed };
-struct UpdateCheckResult { bool update_available; char remote_version[32]; };
-
-class OtaManager {
- public:
-  void Init();                                    // confirm/cancel rollback
-  UpdateCheckResult CheckForUpdate(const char* url);  // header only, no flash write
-  esp_err_t StartUpdate(const char* url);          // download, flash, reboot
-  OtaState State() const;
-  int Progress() const;                            // 0-100, or -1 if unknown
-  esp_err_t LastError() const;
-};
-}
-```
-
-**`CheckForUpdate()` vs. `StartUpdate()`** are independent, composable
-calls, not a cached two-phase handshake -- `StartUpdate()` never trusts a
-prior `CheckForUpdate()` result and re-derives everything itself, so a
-stale check can never justify skipping a real check at flash time.
-`CheckForUpdate()` calls `esp_https_ota_begin()` then
-`esp_https_ota_get_img_desc()` (reads only the new image's header) then
-immediately `esp_https_ota_abort()` -- the full connection lifecycle,
-minus ever writing to flash, exactly the "peek at the header before
-committing" pattern ESP-IDF's own `advanced_https_ota` example
-documents. `StartUpdate()` does the same `begin`/`get_img_desc` pair
-itself, then loops `esp_https_ota_perform()` to download and flash, then
-`esp_https_ota_finish()` to validate and switch the boot partition, then
-`esp_restart()`.
-
-**Version handling reuses M12.3 entirely.** Both calls compare the
-candidate image's `esp_app_desc_t.version` (from
-`esp_https_ota_get_img_desc()`) against `firmware_info::Version()` (the
-one place the *running* version is ever read) with a plain
-`strncmp()` -- there is no second version-comparison mechanism anywhere
-in this project. `StartUpdate()` refuses to proceed
-(`OtaState::kFailed`/`ESP_ERR_INVALID_VERSION`) if the two are identical,
-mirroring the same defensive check ESP-IDF's own example performs before
-ever writing a byte to flash.
-
-**Error handling** maps directly onto where each ESP-IDF call can fail --
-no separate error-classification logic of its own:
-
-| Failure | Where it surfaces |
-|---|---|
-| Network failure, TLS failure | `esp_https_ota_begin()` (connection/handshake) |
-| HTTP error, malformed header | `esp_https_ota_get_img_desc()` |
-| Version mismatch | The `strncmp()` check above, before any flash write |
-| Interrupted download, invalid image (bad magic, wrong chip ID -- `esp_https_ota_perform()` verifies chip ID itself) | `esp_https_ota_perform()`'s loop |
-| Verification failure, incomplete image | `esp_https_ota_is_complete_data_received()` / `esp_https_ota_finish()` |
-
-Every failure path calls `esp_https_ota_abort()` (never after
-`esp_https_ota_finish()`, which frees the handle unconditionally on its
-own -- calling both would be a double free) and returns before
-`esp_ota_set_boot_partition()` is ever reached, which only happens
-inside a *successful* `esp_https_ota_finish()`. The currently running
-partition is therefore never touched on any failure -- not a property
-this code has to maintain itself, but a direct consequence of only ever
-calling `esp_https_ota_finish()` once, at the very end, on the success
-path.
-
-**Rollback** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, newly enabled in
-`sdkconfig.defaults`): a freshly-flashed OTA image boots in
-`ESP_OTA_IMG_PENDING_VERIFY` state; if it crashes, watchdogs, or loses
-power before being confirmed, the bootloader automatically reverts to
-the previous working image on the next boot. `OtaManager::Init()` --
-called once, early, from `App::Run()`, unconditionally on every boot --
-calls `esp_ota_mark_app_valid_cancel_rollback()` to confirm the running
-image (a safe no-op if this boot wasn't the result of a pending OTA at
-all). If the running partition *was* pending-verify, `Init()` also sets
-`State()` to `OtaState::kComplete` first -- simply reaching that check
-from running application code, not a crash loop, is itself the
-confirmation that the just-installed update is healthy. This is base
-rollback (`esp_ota_get_state_partition()`/pending-verify), not
-anti-rollback (`CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK`, a separate,
-security-version-based downgrade-prevention feature left untouched --
-not needed for "a bad update can't brick the dial," the guarantee this
-milestone actually asks for).
-
-**Progress/state** are exposed as three independent `std::atomic`
-members (`state_`/`progress_`/`last_error_`), the same "written by a
-busy task, read by an unrelated poller" reasoning already used for
-`BleManager::conn_handle_` (M7) and `SntpTimeProvider::valid_` (M9) --
-`StartUpdate()` runs synchronously on whichever task calls it (this
-component spawns no task of its own, and nothing in this milestone calls
-`CheckForUpdate()`/`StartUpdate()` automatically), while `State()`/
-`Progress()`/`LastError()` can be polled from any other task without a
-mutex. `Progress()` is a real percentage (`bytes read / esp_https_ota_get_
-image_size()`) when the server reports a `Content-Length`, or `-1` --
-never a fabricated number -- for a chunked-transfer response that
-doesn't.
-
-**Future integration points, deliberately not built here:**
-- **Home Assistant (M13)** would own *when* to call `CheckForUpdate()`/
-  `StartUpdate()` (a user-triggered action, a scheduled check, whatever
-  M13 decides) and *where* the URL comes from -- `OtaManager` itself has
-  no opinion on either, which is exactly why the URL is a plain
-  parameter on both calls rather than configuration `OtaManager` owns.
-- **GitHub Releases / a release server** would be whatever produces the
-  URL passed in -- resolving a "latest release" URL into a concrete
-  asset URL is a separate concern this milestone deliberately doesn't
-  implement (see the milestone's own scope: "configurable HTTPS URL",
-  not a release-discovery protocol).
-- **Automatic update checks** (a timer, a boot-time check) would be a
-  caller wrapping `CheckForUpdate()`, not a change to `OtaManager`
-  itself, which stays purely reactive.
-
-**Developer OTA validation hook**, `CONFIG_GROHE_DEV_FEATURES`
-(`main/Kconfig.projbuild`, disabled by default): since M13 doesn't exist
-yet, this is currently the only caller of `CheckForUpdate()`/
-`StartUpdate()` at all. Holding the encoder button for ~5 s while idle
-logs the request, calls `CheckForUpdate(kDeveloperOtaUrl)`, logs the
-result, and calls `StartUpdate(kDeveloperOtaUrl)` if an update is
-reported available (`app::App::Run()`, `EncoderInput::IsHeldFor()`).
-Every line of it -- both call sites in `app.cpp` and `IsHeldFor()` itself
-in `encoder_input.hpp`/`.cpp` -- is wrapped in
-`#ifdef CONFIG_GROHE_DEV_FEATURES`, so a default build (the option is
-`n` unless explicitly enabled) contains none of this code at all: no
-dead branches, no unreachable-but-linked functions, verified by
-comparing the default build's image size against a build with the
-implementation removed entirely (identical). This is a physical-access
-firmware-update trigger with no authentication beyond "someone is
-holding the button" -- appropriate for validating `components/ota/` on
-a development unit, never for a build meant to run day to day.
-
-## Wi-Fi ownership (M12.5)
-
-**The bug this fixes**: `ota::OtaManager::CheckForUpdate()`/
-`StartUpdate()` called `esp_https_ota_begin()` directly, with no idea
-whether Wi-Fi was even up. On real hardware this meant: Wi-Fi connects at
-boot, `SntpTimeProvider` syncs and tears Wi-Fi back down (M9's own
-"never a runtime dependency" design, working exactly as intended), then
--- potentially much later, e.g. via the M12.4 dev hook -- `StartUpdate()`
-tries to resolve `github.com` over a radio that's been powered off for
-tens of seconds, and `esp_https_ota_begin()` fails with
-`ESP_ERR_HTTP_CONNECT` (DNS resolution failure).
-
-**Why not just have OTA run its own, independent Wi-Fi connect/retry/
-teardown** (the milestone's own explicit constraint: "reuse the existing
-Wi-Fi infrastructure... do not duplicate Wi-Fi logic"). Beyond the
-letter of that instruction, there is only one physical Wi-Fi radio on
-this chip -- two independent `esp_wifi_init()`/`esp_wifi_deinit()`
-state machines racing each other (SNTP's existing one, and a
-hypothetical second one for OTA) is a real correctness risk the moment
-their usage ever overlaps, not just a style preference.
-
-**New `time_service::WifiConnection`** is the extraction: the Wi-Fi
-connect-with-retry-then-give-up state machine that used to live entirely
-inside `SntpTimeProvider` is now its own class, and `SntpTimeProvider`
-itself only owns SNTP-specific sequencing on top of it. It is
-reference-counted (`Acquire()`/`AcquireAsync()` increment, `Release()`
-decrements) rather than assuming exactly one user: the connection is
-brought up on the first acquisition and torn down (`esp_wifi_stop`/
-`deinit`, `esp_netif_destroy`) only once every acquirer has released --
-the mechanism behind "OTA must not permanently keep Wi-Fi enabled after
-completion" that generalizes to *any* number of callers, not just OTA
-specifically, and correctly handles the (currently unlikely, but no
-longer unsafe) case of SNTP and OTA both wanting Wi-Fi at overlapping
-times.
-
-Two acquisition styles, because `SntpTimeProvider` and `OtaManager` have
-different, both pre-existing, threading requirements:
+**Design, kept general on purpose:** reference-counted
+(`Acquire()`/`AcquireAsync()` increment, `Release()` decrements) rather
+than assuming exactly one user -- the connection is brought up on the
+first acquisition and torn down (`esp_wifi_stop`/`deinit`,
+`esp_netif_destroy`) only once every acquirer has released, so a future
+second consumer could reuse this exact class safely, without
+modification, the moment one exists again. Two acquisition styles built
+in for the same reason:
 - `AcquireAsync(on_ready, on_failed)` -- non-blocking, callback-driven.
   `SntpTimeProvider::Init()` uses this, preserving M9's own explicit
   design goal ("no dedicated task, no blocking wait" -- Wi-Fi/SNTP must
   never delay the rest of `App::Run()`'s startup sequence).
-- `Acquire(timeout)` -- blocking, returns whether connected.
-  `OtaManager::CheckForUpdate()`/`StartUpdate()` use this: both were
-  already blocking, synchronous calls (M12.4's own design -- OTA has no
-  background task of its own), so waiting for connectivity inline, the
-  same way they already wait for the HTTPS download itself, changes
-  nothing about their calling contract. This is also literally "wait
-  until networking is ready before starting HTTPS", the milestone's own
-  requirement.
+- `Acquire(timeout)` -- blocking, returns whether connected. Currently
+  unused (no consumer needs a blocking wait today), kept because it's
+  a thin, already-correct wrapper over the same underlying core, not
+  because anything calls it right now.
 
 Both styles share one underlying event-driven core (`WIFI_EVENT`/
-`IP_EVENT` handled on the default event loop's own task, exactly as
-before) plus a `FreeRTOS` event group as the cross-task signal both
-styles read: `AcquireAsync()`'s callbacks fire from the event handler
-directly; `Acquire()` is a thin `xEventGroupWaitBits()` wrapper. Neither
-style spawns a task of its own.
+`IP_EVENT` handled on the default event loop's own task) plus a
+`FreeRTOS` event group as the cross-task signal both styles read:
+`AcquireAsync()`'s callbacks fire from the event handler directly;
+`Acquire()` is a thin `xEventGroupWaitBits()` wrapper. Neither style
+spawns a task of its own. "Connected" (`on_ready()`, or `Acquire() ==
+true`) strictly means both `WIFI_EVENT_STA_CONNECTED` (L2 association)
+*and* `IP_EVENT_STA_GOT_IP` (DHCP complete) have happened for this cycle
+-- a private `sta_connected_` flag, set on `STA_CONNECTED` and cleared on
+`STA_DISCONNECTED`, is a hard precondition `GOT_IP` checks before
+resolving, so a caller that gets a positive result is guaranteed a
+genuinely usable IP connection.
 
-**Ownership moved up**: `WifiConnection` (and the `WifiCredentialsProvider`
-it depends on) used to be constructed inside `GroheClient`, purely
-because `SntpTimeProvider` needed them and `SntpTimeProvider` lived
-there. Now that `OtaManager` -- a sibling of `GroheClient`, not something
-it has ever known about -- needs the *same* connection, both moved up to
-`app::App` (the composition root, exactly where every other
-cross-cutting shared resource already lives) and are injected by
-reference into `GroheClient`'s constructor and `OtaManager`'s
-constructor alike -- the identical dependency-injection pattern already
-used one level down (`SntpTimeProvider` never owned
-`WifiCredentialsProvider` either). `GroheClient`'s own BLE/protocol
-behavior -- connection handling, authentication, dispense/stop -- is
-completely unchanged by this; only where one pre-existing, unrelated
-dependency (Wi-Fi, needed solely for SNTP timestamps) is constructed
-moved, from `grohe_client.hpp`'s own member list up to `app.hpp`'s.
+**Ownership** lives at `app::App` (the composition root, where every
+other cross-cutting shared resource already lives), injected by
+reference into `GroheClient`'s constructor -- the identical
+dependency-injection pattern already used one level down
+(`SntpTimeProvider` never owned `WifiCredentialsProvider` either).
 
 ```
 app::App
- |-- time_service::WifiConnection wifi_connection_        (M12.5, new)
+ |-- time_service::WifiConnection wifi_connection_
  |     depends on: time_service::LocalWifiCredentialsProvider
  |
- |-- grohe_ble::GroheClient grohe_client_{wifi_connection_}
- |     '-- time_service::SntpTimeProvider time_provider_(wifi_connection_)
- |
- '-- ota::OtaManager ota_{wifi_connection_}
+ '-- grohe_ble::GroheClient grohe_client_{wifi_connection_}
+       '-- time_service::SntpTimeProvider time_provider_(wifi_connection_)
 ```
 
 `App::Run()` calls `wifi_connection_.Init()` once, early -- before
@@ -529,37 +348,20 @@ app::App
 `SntpTimeProvider::Init()`) is the first thing to actually acquire a
 connection through it.
 
-### Multi-cycle correctness (hardware-found, post-M12.5)
-
-Two issues surfaced only once real hardware exercised `WifiConnection`
-across more than one acquire/release cycle in a single boot (SNTP at
-startup, then the M12.4 dev OTA hook tens of seconds later) -- something
-no build-time check can catch, since both are about the exact interleaving
-of asynchronous ESP-IDF events across cycles, not compile-time structure.
-
-**"Connected" now strictly means associated *and* has an IP.**
-`HandleWifiOrIpEvent()` previously resolved `kConnectedBit` on
-`IP_EVENT_STA_GOT_IP` alone. ESP-IDF's own contract guarantees
-`WIFI_EVENT_STA_CONNECTED` (L2 association) always precedes `GOT_IP`
-(DHCP only ever starts after association), so this was never technically
-wrong -- but it left the guarantee implicit rather than enforced. A
-private `sta_connected_` flag, set on `STA_CONNECTED` and cleared on
-`STA_DISCONNECTED`, is now a hard precondition `GOT_IP` checks before
-calling `Resolve(true)` -- so a caller that gets `on_ready()`/`Acquire()
-== true` is guaranteed a genuinely usable IP connection, with nothing
-left for `OtaManager` to double-check itself before starting HTTPS.
-
-**A cycle's own teardown can poison the next cycle.** `TearDownWifi()`'s
+**A cycle's own teardown can poison the next cycle** -- a real,
+hardware-found bug, worth keeping as documentation even with a single
+consumer today, since it applies to any repeated acquire/release
+sequence, not just a multi-consumer one. `TearDownWifi()`'s
 `esp_wifi_stop()` posts `WIFI_EVENT_STA_DISCONNECTED` asynchronously
 whenever the STA was still associated -- an ordinary side effect of
 stopping, indistinguishable on the wire from a real disconnect. That
 post can only be processed once the event loop task's own call stack
 (which, for `Release()`, is running the *same* teardown that generated
 it) unwinds back to its dispatch loop -- by which point `ref_count_` is
-already 0 and `esp_wifi_deinit()` has already run. If `HandleWifiOrIpEvent()`
-had no way to recognize this as stale, it would retry via
-`esp_wifi_connect()` against an already-deinitialized driver, fail
-synchronously, and set `kFailedBit` -- with nobody having acquired
+already 0 and `esp_wifi_deinit()` has already run. If
+`HandleWifiOrIpEvent()` had no way to recognize this as stale, it would
+retry via `esp_wifi_connect()` against an already-deinitialized driver,
+fail synchronously, and set `kFailedBit` -- with nobody having acquired
 anything. The *next* real `Acquire()`/`AcquireAsync()` call would then
 see that leftover `kFailedBit`, either failing immediately itself or
 (worse) causing its own genuine `WIFI_EVENT_STA_START`/`STA_CONNECTED`/
@@ -567,24 +369,11 @@ see that leftover `kFailedBit`, either failing immediately itself or
 resolved this cycle" guard, since that guard only checks *whether* a bit
 is set, not *which* cycle set it.
 
-The fix: `HandleWifiOrIpEvent()` now checks `ref_count_.load() == 0`
-*before* anything else. While nobody holds an acquisition, no event can
-be for a live cycle -- it can only be leftover noise from the teardown
-that just dropped `ref_count_` to 0 -- so it's dropped unconditionally,
-before it can touch `retry_count_`, `sta_connected_`, or either bit. This
-is the actual defense; earlier, `kConnectedBit`/`kFailedBit` were instead
-cleared at the *end* of `Release()` specifically to close a different,
-theoretical race (two callers racing the same first-acquisition), but
-doing so removed the incidental protection the original bit-clear timing
-happened to provide against exactly this stale-event case. Bits are
-cleared at the *start* of the next `Acquire()`/`AcquireAsync()` again now
-(matching `retry_count_`/`sta_connected_`'s own reset, in the same
-place) -- clear-timing was never the right tool for this problem, and
-the `ref_count_` guard makes it moot either way. The
-two-callers-racing-first-acquisition case remains exactly as before:
-undesirable in theory, not reachable today (every real caller runs on
-the single app task), and documented rather than solved with a mutex
-this codebase has no actual need for.
+The fix: `HandleWifiOrIpEvent()` checks `ref_count_.load() == 0` before
+anything else. While nobody holds an acquisition, no event can be for a
+live cycle -- it can only be leftover noise from the teardown that just
+dropped `ref_count_` to 0 -- so it's dropped unconditionally, before it
+can touch `retry_count_`, `sta_connected_`, or either bit.
 
 ## Dispense UI (M11)
 
@@ -1059,13 +848,11 @@ synced, `time(nullptr)` keeps advancing correctly for the rest of the
 session from the same tick source used elsewhere in this codebase,
 confirmed on hardware across several dispense/stop commands issued tens
 of seconds apart with monotonically increasing, genuine timestamps.
-(As of M12.5, "acquires"/"releases" is literal: the connect-with-retry
-state machine and the actual `esp_wifi_stop()`/`esp_wifi_deinit()`/
-`esp_netif_destroy()` teardown described in the rest of this section
-moved into a new, shared `time_service::WifiConnection` so
-`ota::OtaManager` could reuse the identical logic instead of running a
-second, independent Wi-Fi session — see "Wi-Fi ownership (M12.5)" above
-for the current design; the reasoning below is preserved as the
+("Acquires"/"releases" is literal: the connect-with-retry state machine
+and the actual `esp_wifi_stop()`/`esp_wifi_deinit()`/`esp_netif_destroy()`
+teardown described in the rest of this section later moved into a
+standalone `time_service::WifiConnection` — see "Wi-Fi connectivity"
+above for the current design; the reasoning below is preserved as the
 original M9 design record.)
 
 *Entirely event-driven, no dedicated task.* `esp_event`'s default loop

@@ -3,11 +3,11 @@
 #include "apps/esp_sntp.h"
 #include "esp_log.h"
 
-// This provider acquires Wi-Fi (via WifiConnection, shared with
-// ota::OtaManager -- see wifi_connection.hpp) purely as a one-shot SNTP
-// time source, then releases it again -- never a runtime dependency for
-// anything else in this firmware (see the header's own comment). The
-// design is entirely event-driven, with no dedicated FreeRTOS task and no
+// This provider acquires Wi-Fi (via WifiConnection -- see
+// wifi_connection.hpp) purely as a one-shot SNTP time source, then
+// releases it again -- never a runtime dependency for anything else in
+// this firmware (see the header's own comment). The design is entirely
+// event-driven, with no dedicated FreeRTOS task and no
 // blocking wait, mirroring how grohe_ble::BleManager itself never spins up
 // a task to poll NimBLE -- it reacts to NimBLE's own callbacks. Here:
 //

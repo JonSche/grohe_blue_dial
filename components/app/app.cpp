@@ -26,21 +26,6 @@ constexpr TickType_t kPollPeriod = pdMS_TO_TICKS(20);
 // command, no controller reset, no LVGL pause, no framebuffer change).
 // Compile-time only, not a runtime setting, for now.
 constexpr uint32_t kDisplaySleepTimeoutMs = 60000;
-
-#ifdef CONFIG_GROHE_DEV_FEATURES
-// ==== Developer OTA validation hook (M12.4) ====
-// Gated behind CONFIG_GROHE_DEV_FEATURES (disabled by default -- see
-// main/Kconfig.projbuild) precisely so it compiles out of, and costs
-// nothing in, any build that doesn't explicitly ask for it. Reserved
-// purely for developer testing: normal dial operation (dispense, stop,
-// water type, display sleep, BLE) is completely unaffected either way.
-//
-// The one place the test OTA image URL is defined.
-constexpr char kDeveloperOtaUrl[] =
-    "https://github.com/JonSche/grohe_blue_dial/releases/download/"
-    "v1.0.1-dev/grohe_dial.bin";
-constexpr int64_t kDevOtaHoldThresholdUs = 5'000'000;  // ~5 s.
-#endif  // CONFIG_GROHE_DEV_FEATURES
 }  // namespace
 
 void App::Run() {
@@ -54,20 +39,11 @@ void App::Run() {
            firmware_info::GitBranch(), firmware_info::GitDirty() ? ", dirty" : "");
   ESP_LOGI(kTag, "Built: %s %s", firmware_info::BuildDate(), firmware_info::BuildTime());
 
-  // M12.4: confirms this boot is healthy (cancelling any pending OTA
-  // rollback) before anything else runs -- see OtaManager::Init()'s own
-  // comment. Cheap and always safe to call; not gated on any of the
-  // subsystems below.
-  ota_.Init();
-
-  // M12.5: one-time Wi-Fi driver/event-loop setup (NVS, netif, the
-  // default event loop, this class's own event handlers) -- does not
-  // connect yet. Must happen before grohe_client_.Init() below, which
-  // (via its own SntpTimeProvider) is the first thing to actually
-  // acquire a connection through it; ota_'s later CheckForUpdate()/
-  // StartUpdate() calls share this exact same instance rather than
-  // bringing up a second, independent Wi-Fi session -- see
-  // wifi_connection.hpp's own comment.
+  // One-time Wi-Fi driver/event-loop setup (NVS, netif, the default event
+  // loop, this class's own event handlers) -- does not connect yet. Must
+  // happen before grohe_client_.Init() below, which (via its own
+  // SntpTimeProvider) is the first thing to actually acquire a connection
+  // through it -- see wifi_connection.hpp's own comment.
   ESP_ERROR_CHECK(wifi_connection_.Init());
 
   ESP_ERROR_CHECK(display_.Init());
@@ -101,14 +77,6 @@ void App::Run() {
   // only resumes once the dial is back to its normal idle state.
   int64_t last_activity_us = esp_timer_get_time();
   bool backlight_on = true;
-
-#ifdef CONFIG_GROHE_DEV_FEATURES
-  // See kDeveloperOtaUrl's own comment. Fires the check/update once per
-  // continuous hold past the threshold (mirroring EncoderEvent::
-  // kLongPress's own "fire once, not repeatedly" behaviour), resetting
-  // the moment the button is released.
-  bool dev_ota_hold_fired = false;
-#endif  // CONFIG_GROHE_DEV_FEATURES
 
   for (;;) {
     bool state_changed = false;
@@ -215,38 +183,6 @@ void App::Run() {
       display_.SetBacklight(false);
       backlight_on = false;
     }
-
-#ifdef CONFIG_GROHE_DEV_FEATURES
-    // Developer OTA validation hook -- see main/Kconfig.projbuild's own
-    // help text. Only reachable by deliberately holding the encoder
-    // button for ~5 s while idle; does nothing on every other input, and
-    // never runs automatically. Entirely absent from a default build.
-    if (encoder_input_.IsHeldFor(kDevOtaHoldThresholdUs)) {
-      if (!dev_ota_hold_fired &&
-          dispense_status == dial_state::DispenseStatus::kIdle) {
-        dev_ota_hold_fired = true;
-        ESP_LOGW(kTag, "DEV HOOK: manual OTA check requested (5s encoder hold)");
-        const ota::UpdateCheckResult check = ota_.CheckForUpdate(kDeveloperOtaUrl);
-        ESP_LOGW(kTag,
-                 "DEV HOOK: CheckForUpdate -> update_available=%d "
-                 "remote_version=\"%s\" last_error=%s",
-                 check.update_available, check.remote_version,
-                 esp_err_to_name(ota_.LastError()));
-        if (check.update_available) {
-          ESP_LOGW(kTag, "DEV HOOK: update available -- starting StartUpdate()");
-          const esp_err_t start_err = ota_.StartUpdate(kDeveloperOtaUrl);
-          // Only reached on failure -- StartUpdate() calls esp_restart()
-          // itself on success and never returns here.
-          ESP_LOGE(kTag, "DEV HOOK: StartUpdate failed: %s",
-                   esp_err_to_name(start_err));
-        } else {
-          ESP_LOGW(kTag, "DEV HOOK: no update available (or check failed) -- not starting");
-        }
-      }
-    } else {
-      dev_ota_hold_fired = false;
-    }
-#endif  // CONFIG_GROHE_DEV_FEATURES
 
     vTaskDelay(kPollPeriod);
   }
