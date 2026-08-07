@@ -179,6 +179,70 @@ boot screen with a real dial UI) without touching one another.
   future code that updates the UI from the main task (e.g. in response to a
   BLE event or an encoder turn) must follow the same pattern.
 
+## Display orientation
+
+An enclosure revision mounts the LCD module physically rotated 90
+degrees clockwise from before (a mechanical simplification, not a
+firmware decision) — the firmware output has to rotate to match.
+
+**Configured entirely at the panel-driver level, exactly once**, in
+`Gc9a01Display::Init()` (`components/display/gc9a01_display.cpp`),
+immediately after `esp_lcd_panel_init()` and before
+`esp_lcd_panel_disp_on_off()`:
+
+```cpp
+ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_, true));
+ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, true, true));
+```
+
+`esp_lcd_panel_swap_xy()`/`esp_lcd_panel_mirror()` are standard `esp_lcd`
+API (`esp_lcd_panel_ops.h`) — both were already implemented in
+`lcd_panel_gc9a01.c`'s `panel_gc9a01_swap_xy()`/`panel_gc9a01_mirror()`
+(this project's own ported panel driver, see "Component map" above),
+just never called before now. Both write the GC9A01's MADCTL register
+(`LCD_CMD_MADCTL`, the same command `0x36` the vendor init table already
+sets once at boot) with the MV/MX/MY bits — real hardware rotation, not
+a software workaround. No other code changed: LVGL still renders into
+the exact same 240×240 logical coordinate space it always has (this
+panel is square, so swapping X/Y doesn't even change the resolution
+LVGL is told about — no `lv_display_set_resolution()` call was needed),
+and every widget, animation, and the boot splash keep the coordinates
+they already had. The panel driver alone is responsible for physically
+placing each pixel LVGL writes at logical `(x, y)` onto the correct
+rotated location on the glass.
+
+**Why `swap_xy(true)` + `mirror(true, true)` specifically**: this
+panel's own confirmed-upright baseline MADCTL — set once by the vendor
+init table (`kInit_36` in `gc9a01_vendor_init.cpp`) — is `MX=1, MY=0,
+MV=0` (plus the unrelated `BGR` bit, untouched by either call above).
+That's not the generic MX=0 "textbook" baseline most public MADCTL
+rotation tables assume, so this project's own rotation had to be
+derived from its actual starting point rather than copied from one of
+those tables. Modeling the MADCTL transform as: `MV` swaps
+`(x, y) -> (y, x)`, then `MX` reverses the resulting `x` (`x -> W-1-x`),
+then `MY` reverses the resulting `y` (`y -> H-1-y`) — the standard
+ILI9341/GC9A01-family MADCTL semantics this driver itself implements —
+solving for the bit combination that rotates the *output* of the
+already-confirmed-correct baseline by 90° clockwise gives `MV=1, MX=1,
+MY=1`, i.e. `swap_xy(true)` plus `mirror(true, true)`.
+
+**Not yet verified on real hardware from this environment** (no serial
+monitor or physical device reachable here) — specifically, that the
+result reads as *clockwise* rather than counter-clockwise to a human
+viewer once actually flashed. If it turns out reversed, the fix is
+local to these two lines (e.g. `mirror(panel_, false, false)` for the
+other 90° rotation), not a UI or coordinate change anywhere else — the
+whole point of rotating at this layer.
+
+**Encoder behavior is unaffected by any of this, structurally, not just
+in practice.** The rotary encoder is a separate GPIO-ISR quadrature
+input path (`encoder::RotaryEncoder`/`EncoderInput`, see "Why GPIO-ISR
+(not PCNT) for the encoder" below) with no dependency on, or shared code
+with, the SPI display output path — physically remounting the *display*
+changes nothing about how encoder pulses are decoded into
+`EncoderEvent::kRotateCw`/`kRotateCcw`. No encoder file was touched for
+this change.
+
 ## Flash layout (M9)
 
 Verified against the real hardware (`esptool flash_id`), not assumed from

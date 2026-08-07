@@ -2,6 +2,7 @@
 
 #include "board/board_config.hpp"
 #include "esp_lcd_gc9a01.h"
+#include "esp_lcd_panel_ops.h"
 #include "gc9a01_vendor/gc9a01_vendor_init.hpp"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -124,6 +125,32 @@ esp_err_t Gc9a01Display::Init() {
   ESP_ERROR_CHECK(lcd_new_panel_gc9a01(panel_io_, &panel_cfg, &panel_));
   ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_));
   ESP_ERROR_CHECK(esp_lcd_panel_init(panel_));
+
+  // Enclosure revision: the LCD module is now mounted physically rotated
+  // 90 degrees clockwise (mechanical simplification, not a firmware
+  // choice) -- see docs/ARCHITECTURE.md's "Display orientation" section
+  // for the full derivation. Configured once, here, entirely at the
+  // panel-driver/MADCTL level (lcd_panel_gc9a01.c's swap_xy()/mirror()
+  // implementations, both already present -- see that file), so LVGL and
+  // every widget it renders keep using the exact same 240x240 logical
+  // coordinate space as before; nothing above this call knows the output
+  // is rotated at all. Cheap on a 240x240 *square* panel specifically:
+  // swapping X/Y doesn't change the resolution LVGL is told about, so no
+  // lv_display_set_resolution() adjustment is needed either.
+  //
+  // The panel's existing confirmed-upright baseline MADCTL is MX=1,
+  // MY=0, MV=0 (kInit_36 in gc9a01_vendor_init.cpp -- BGR aside, which
+  // swap_xy()/mirror() below don't touch). Deriving a 90 degree clockwise
+  // rotation of the *output* from that specific baseline (not a generic
+  // MX=0 textbook baseline) gives swap_xy(true) + mirror(true, true) --
+  // see ARCHITECTURE.md for the coordinate-transform derivation. Still
+  // pending an on-hardware confirmation that this reads as clockwise
+  // (not counter-clockwise) to a human viewer, the same "not yet
+  // verifiable from this environment" caveat every hardware-facing
+  // change in this project carries until it's actually flashed.
+  ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_, true));
+  ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, true, true));
+
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));
 
   ESP_LOGI(kTag, "Starting self-owned LVGL v9 integration");
