@@ -181,25 +181,44 @@ boot screen with a real dial UI) without touching one another.
 
 ## Display orientation
 
-The enclosure mounts the LCD module physically rotated 90 degrees from
-its unrotated baseline (a mechanical decision, not a firmware one) —
-the firmware output has to rotate to match. This is the fourth
-configuration after three earlier attempts; the full history is kept
+The enclosure mounts the LCD module physically rotated from its native
+upright orientation (a mechanical decision, not a firmware one) — the
+firmware output has to rotate to match. This has changed four times
+across enclosure revisions so far; the full derivation history is kept
 below since each earlier result is what the next attempt was actually
-derived from, not discarded dead ends.
+derived from, not a discarded dead end, and since it's also the
+evidence backing every entry in the rotation table below.
 
-**Configured entirely at the panel-driver level, exactly once**, in
+**Centrally configured, as a single constant**: `board::kDisplayRotation`
+(`components/board/include/board/board_config.hpp`), one of
+`board::DisplayRotation::{k0, k90, k180, k270}` (0/90/180/270 degrees
+clockwise). Changing that one line is sufficient to re-target a
+different physical mounting — no UI, widget, or rendering code needs to
+change, or knows the concept exists. Today it's `k90`, confirmed on the
+physical device to be correct for the current enclosure.
+
+All four values have been built and verified on real hardware, each
+producing a clean rotation with no unintended mirroring — see "Rotation
+table" below for the per-value evidence.
+
+**Applied entirely at the panel-driver level, exactly once**, in
 `Gc9a01Display::Init()` (`components/display/gc9a01_display.cpp`),
 immediately after `esp_lcd_panel_init()` and before
 `esp_lcd_panel_disp_on_off()`:
 
 ```cpp
-ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_, true));
-ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, false, false));
+const MadctlRotation madctl_rotation =
+    ToMadctlRotation(board::kDisplayRotation);
+ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_, madctl_rotation.swap_xy));
+ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, madctl_rotation.mirror_x,
+                                      madctl_rotation.mirror_y));
 ```
 
-`esp_lcd_panel_swap_xy()`/`esp_lcd_panel_mirror()` are standard
-`esp_lcd` API (`esp_lcd_panel_ops.h`), already implemented in
+`ToMadctlRotation()` (anonymous namespace, same file) is a pure lookup
+table from `board::DisplayRotation` to the `swap_xy()`/`mirror()`
+arguments that produce it — see "Rotation table" below for its exact
+contents. `esp_lcd_panel_swap_xy()`/`esp_lcd_panel_mirror()` are
+standard `esp_lcd` API (`esp_lcd_panel_ops.h`), already implemented in
 `lcd_panel_gc9a01.c`'s `panel_gc9a01_swap_xy()`/`panel_gc9a01_mirror()`
 (this project's own ported panel driver, see "Component map" above).
 Both write the GC9A01's MADCTL register (`LCD_CMD_MADCTL`, the same
@@ -209,34 +228,50 @@ No other code changed: LVGL still renders into the exact same 240×240
 logical coordinate space it always has (this panel is square, so
 swapping X/Y doesn't even change the resolution LVGL is told about —
 no `lv_display_set_resolution()` call is needed), and every widget,
-animation, and the boot splash keep the coordinates they already had.
-The panel driver alone is responsible for physically placing each
-pixel LVGL writes at logical `(x, y)` onto the correct rotated location
-on the glass.
+animation, and the boot splash keep the coordinates they already had
+regardless of which `board::DisplayRotation` is selected. The panel
+driver alone is responsible for physically placing each pixel LVGL
+writes at logical `(x, y)` onto the correct rotated location on the
+glass.
 
-**Full revision history**, since this panel's own confirmed-upright
-baseline MADCTL — set once by the vendor init table (`kInit_36` in
+**Rotation table**, since this panel's own confirmed-upright baseline
+MADCTL — set once by the vendor init table (`kInit_36` in
 `gc9a01_vendor_init.cpp`) — is `MX=1, MY=0, MV=0` (plus the unrelated
 `BGR` bit, untouched by any of the calls below), not the generic
 `MX=0` baseline most public MADCTL rotation tables assume, so none of
-these values could be copied from one of those tables directly:
+these values could be copied from one of those tables directly. Every
+row is a MADCTL state this project's own enclosure bring-up already
+put on real hardware (see "Full revision history" below) — none are a
+fresh theoretical derivation:
+
+| `DisplayRotation` | `swap_xy` | `mirror(x, y)` | MADCTL (MV, MX, MY) | Hardware evidence |
+| --- | --- | --- | --- | --- |
+| `k0`   | `false` | `(true, false)` | `0, 1, 0` | The vendor init table's own MADCTL value — confirmed upright with no calls at all. |
+| `k90`  | `true`  | `(false, false)` | `1, 0, 0` | The configuration shipping today (revision 4 below) — confirmed correct amount, correct (clockwise) direction, no mirroring. |
+| `k180` | `true`  | `(true, true)` | `1, 1, 1` | Confirmed, while chasing a 90° rotation on revision 1 below, to produce a clean 180° rotation. |
+| `k270` | `true`  | `(true, false)` | `1, 1, 0` | Confirmed, on revision 1 below, to rotate the correct (90°) amount but in the wrong (counter-clockwise) direction — i.e. exactly `k270`'s definition (270° clockwise == 90° counter-clockwise). |
+
+The one MADCTL state that shows up in the revision history but isn't in
+this table, `swap_xy(true)` + `mirror(false, true)` (`MV=1, MX=0,
+MY=1`, from revision 3 below), is deliberately excluded: it's the
+correct 90°-clockwise *amount* and direction, but mirrored — a
+reflection, not one of the four clean rotations this abstraction
+offers.
+
+**Full revision history**, since each entry in the table above traces
+back to one of these four enclosure revisions:
 
 1. An enclosure revision called for a 90° clockwise rotation.
    `swap_xy(true)` + `mirror(true, false)` (`MV=1, MX=1, MY=0`) was
    derived as the best candidate and hardware-confirmed to rotate the
    correct 90°, but in the wrong direction (counter-clockwise instead
-   of clockwise).
+   of clockwise) — this is `k270` in the table above.
 2. A later enclosure revision instead called for 180°.
    `swap_xy(true)` + `mirror(true, true)` (`MV=1, MX=1, MY=1`) had
    already been tried, while chasing (1), and was hardware-confirmed to
    produce a clean 180° rotation — directly reused here once the
-   requirement changed to 180° for real. `swap_xy()` was then dropped
-   entirely: a true 180° rotation is a point reflection through the
-   center (reverse both the column and row address order), which,
-   unlike a 90°/270° rotation, never requires exchanging row and column
-   order (`MV`/`swap_xy()`) on any MADCTL-based panel. Reversing *both*
-   mirror bits from baseline (`MX: 1 -> 0`, `MY: 0 -> 1`, `MV`
-   untouched) gave `swap_xy(false)` + `mirror(false, true)` for 180°.
+   requirement changed to 180° for real. This is `k180` in the table
+   above.
 3. The enclosure reverted to the 90° rotation from (1). Hardware
    feedback on that first 90° attempt was conclusive: correct rotation
    amount, wrong direction (needed a further 90° counter-clockwise).
@@ -245,13 +280,16 @@ these values could be copied from one of those tables directly:
    `swap_xy(true)` + `mirror(false, true)` (`MV=1, MX=0, MY=1`) — and
    was hardware-confirmed to be the correct rotation amount *and*
    direction, but horizontally mirrored (text only readable as a
-   mirror image).
+   mirror image). This is the excluded reflection state above, not a
+   row in the table.
 4. With `swap_xy(true)` held fixed throughout (three of its four
    possible `mirror()` pairings now hardware-characterized: `(true,
    true)` is 180°; `(true, false)` is 90° the wrong direction; `(false,
    true)` is 90° the right direction but mirrored), the one remaining
-   untested pairing, `mirror(false, false)` — the configuration above —
-   is what removes that mirroring while keeping the same rotation.
+   untested pairing, `mirror(false, false)`, is what removes that
+   mirroring while keeping the same rotation — this is `k90` in the
+   table above, and the value `board::kDisplayRotation` is set to
+   today.
 
 **Encoder behavior is unaffected by any of this, structurally, not just
 in practice.** The rotary encoder is a separate GPIO-ISR quadrature

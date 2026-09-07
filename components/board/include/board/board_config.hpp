@@ -33,6 +33,26 @@ inline constexpr int kLcdPixelClockHz = 80 * 1000 * 1000;
 inline constexpr int kLcdHorizontalResolution = 240;
 inline constexpr int kLcdVerticalResolution = 240;
 
+// Physical display mounting orientation -- a property of how the LCD
+// module sits in the enclosure (mechanical), not of the UI rendered onto
+// it. This is the one place that decision is recorded; everything above
+// LVGL's flush callback (display::Gc9a01Display::Init(),
+// components/display/gc9a01_display.cpp) keeps rendering into the same
+// logical 240x240 coordinate space no matter which value is selected --
+// see docs/ARCHITECTURE.md's "Display orientation" section for the
+// per-value MADCTL derivation and hardware-verification history.
+enum class DisplayRotation {
+  k0,    // 0 degrees -- the panel's native upright orientation.
+  k90,   // 90 degrees clockwise.
+  k180,  // 180 degrees.
+  k270,  // 270 degrees clockwise (equivalently, 90 degrees counter-clockwise).
+};
+
+// Current enclosure mounts the LCD rotated 90 degrees clockwise from the
+// panel's native upright orientation. Change only this line to match a
+// different physical mounting -- no other file needs to change.
+inline constexpr DisplayRotation kDisplayRotation = DisplayRotation::k90;
+
 // --- Rotary encoder + button -------------------------------------------
 inline constexpr gpio_num_t kEncoderPinPhaseA = GPIO_NUM_7;
 inline constexpr gpio_num_t kEncoderPinPhaseB = GPIO_NUM_6;

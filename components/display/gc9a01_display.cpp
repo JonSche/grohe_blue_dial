@@ -1,5 +1,7 @@
 #include "display/gc9a01_display.hpp"
 
+#include <cstdlib>
+
 #include "board/board_config.hpp"
 #include "esp_lcd_gc9a01.h"
 #include "esp_lcd_panel_ops.h"
@@ -46,6 +48,51 @@ bool OnColorTransDoneTrampoline(esp_lcd_panel_io_handle_t /*panel_io*/,
 }
 
 void TickCb(void* /*arg*/) { lv_tick_inc(kLvTickPeriodMs); }
+
+// The panel-driver-level MADCTL calls (esp_lcd_panel_swap_xy()/mirror(),
+// LCD_CMD_MADCTL's MV/MX/MY bits) that produce each board::DisplayRotation,
+// relative to this panel's own hardware-confirmed native-upright baseline
+// MADCTL -- MX=1, MY=0, MV=0 (kInit_36 in gc9a01_vendor_init.cpp; not the
+// generic MX=0 baseline most public MADCTL rotation tables assume, so
+// these can't be copied from one of those tables). Every entry below is a
+// specific MADCTL state this project's enclosure bring-up already put on
+// real hardware across four revisions -- see docs/ARCHITECTURE.md's
+// "Display orientation" section for the full per-value confirmation
+// history; nothing here is a fresh theoretical derivation.
+struct MadctlRotation {
+  bool swap_xy;
+  bool mirror_x;
+  bool mirror_y;
+};
+
+[[nodiscard]] MadctlRotation ToMadctlRotation(board::DisplayRotation rotation) {
+  switch (rotation) {
+    case board::DisplayRotation::k0:
+      // MV=0, MX=1, MY=0 -- the vendor init table's own MADCTL value,
+      // confirmed upright with no calls at all.
+      return {.swap_xy = false, .mirror_x = true, .mirror_y = false};
+    case board::DisplayRotation::k90:
+      // MV=1, MX=0, MY=0 -- the configuration this enclosure revision
+      // ships with today, confirmed correct amount, correct (clockwise)
+      // direction, no mirroring.
+      return {.swap_xy = true, .mirror_x = false, .mirror_y = false};
+    case board::DisplayRotation::k180:
+      // MV=1, MX=1, MY=1 -- confirmed, while chasing a 90-degree
+      // rotation on an earlier enclosure revision, to produce a clean
+      // 180-degree rotation.
+      return {.swap_xy = true, .mirror_x = true, .mirror_y = true};
+    case board::DisplayRotation::k270:
+      // MV=1, MX=1, MY=0 -- confirmed, on the very first enclosure
+      // revision, to rotate the correct (90-degree) amount but in the
+      // wrong direction -- i.e. counter-clockwise, which is exactly
+      // what k270 (270 clockwise == 90 counter-clockwise) means.
+      return {.swap_xy = true, .mirror_x = true, .mirror_y = false};
+  }
+  // Unreachable for any valid board::DisplayRotation; mirrors this file's
+  // existing ESP_ERROR_CHECK()-everywhere posture by failing loudly
+  // instead of silently picking an orientation nobody asked for.
+  abort();
+}
 }  // namespace
 
 Gc9a01Display* Gc9a01Display::instance_ = nullptr;
@@ -126,35 +173,21 @@ esp_err_t Gc9a01Display::Init() {
   ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_));
   ESP_ERROR_CHECK(esp_lcd_panel_init(panel_));
 
-  // Enclosure revision: the LCD module is mounted physically rotated 90
-  // degrees from its unrotated baseline (mechanical decision, not a
-  // firmware one) -- see docs/ARCHITECTURE.md's "Display orientation"
-  // section for the full derivation and revision history, including the
-  // now-superseded 180-degree and earlier-90-degree-attempt
-  // configurations this one replaces. Configured once, here, entirely
-  // at the panel-driver/MADCTL level (lcd_panel_gc9a01.c's
+  // Physical display mounting orientation -- centrally configured via
+  // board::kDisplayRotation (board_config.hpp), translated to panel-driver
+  // MADCTL calls by ToMadctlRotation() above. Configured once, here,
+  // entirely at the panel-driver/MADCTL level (lcd_panel_gc9a01.c's
   // swap_xy()/mirror() implementations, already present -- see that
   // file), so LVGL and every widget it renders keep using the exact same
-  // 240x240 logical coordinate space as before; nothing above this call
-  // knows the output is rotated at all.
-  //
-  // The panel's existing confirmed-upright baseline MADCTL is MX=1,
-  // MY=0, MV=0 (kInit_36 in gc9a01_vendor_init.cpp -- BGR aside, which
-  // neither call below touches) -- not the generic MX=0 textbook
-  // baseline most public MADCTL rotation tables assume, so none of
-  // these values could be copied from a generic table. swap_xy(true)
-  // (below) is held fixed -- confirmed correct on hardware, both here
-  // and for the two other now-superseded configurations that also used
-  // it -- and out of the 4 possible mirror() pairs with swap_xy(true)
-  // fixed, 3 are already hardware-characterized: (true, true) is a
-  // clean 180 degrees; (true, false) is the correct 90 degrees but the
-  // wrong rotational direction; (false, true) was the correct 90
-  // degrees in the correct direction, but horizontally mirrored (text
-  // only readable as a mirror image). The one remaining untested pair,
-  // (false, false), is what removes that mirroring while keeping the
-  // same swap_xy(true)-driven rotation.
-  ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_, true));
-  ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, false, false));
+  // 240x240 logical coordinate space regardless of which orientation is
+  // selected; nothing above this call knows the output is rotated at
+  // all. See docs/ARCHITECTURE.md's "Display orientation" section for
+  // the per-value MADCTL derivation and hardware-verification history.
+  const MadctlRotation madctl_rotation =
+      ToMadctlRotation(board::kDisplayRotation);
+  ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_, madctl_rotation.swap_xy));
+  ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_, madctl_rotation.mirror_x,
+                                        madctl_rotation.mirror_y));
 
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_, true));
 
