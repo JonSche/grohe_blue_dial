@@ -587,7 +587,7 @@ design.
       `idf.py monitor` would show, built from the same values already
       confirmed correct via the generated header/build log.
 
-### M12.4 — OTA
+### M12.4 — OTA ✅
 
 A first OTA mechanism (`esp_https_ota`/TLS) was built, hardware-tested,
 and fully reverted after failing on real hardware with a heap-
@@ -625,10 +625,14 @@ with no full-image buffering. See
       demand, not just briefly after boot. Still fully non-blocking and
       non-fatal: every other subsystem starts up exactly as before
       regardless of Wi-Fi's state.
-- [x] `scripts/ota.sh <device-ip>`: locates `build/grohe_dial.bin`,
-      reads the shared secret from the same local header the firmware
-      reads, uploads with `curl`, checks the HTTP result, and polls
-      `/version` to confirm the reboot.
+- [x] `scripts/ota.sh <device-ip>`: builds the firmware itself
+      (`idf.py build`, aborting immediately on any build failure -- no
+      OTA attempt with a stale/missing binary), prints the version/
+      commit/branch actually embedded in the just-built binary *before*
+      upload, uploads with `curl` (unchanged OTA protocol), polls
+      `/version` after the reboot, and reports `OTA SUCCESS` only if the
+      version *and* commit the device reports afterward match what was
+      just built -- never a blind `version.txt` comparison.
 - [x] Reused the OTA-ready partition table from M9 unchanged (`ota_0`/
       `ota_1`/`otadata`) and M12.3's firmware version metadata
       (`firmware_info::Version()`/`GitCommit()`, read by `/version`).
@@ -658,6 +662,31 @@ with no full-image buffering. See
       re-entrancy/deadlock risk) -- see
       [ARCHITECTURE.md](ARCHITECTURE.md#wifi-connectivity). Time sync
       confirmed completing on hardware after the fix.
+- [x] Verified on hardware a second time, end to end, using
+      `scripts/ota.sh`'s automatic-build workflow: a single
+      `./scripts/ota.sh <device-ip>` run built the firmware, uploaded it,
+      and confirmed the device rebooted into exactly that build --
+
+      ```
+      Device:   192.168.178.64
+      Firmware: build/grohe_dial.bin
+      Upload accepted (HTTP 200) -- device is rebooting.
+      Device is back up.
+
+      === Firmware running on device ===
+      Version: v1.0.1-dev
+      Commit:  0a3bb63
+      Branch:  main (dirty)
+      ==================================
+
+      OTA SUCCESS -- device is running the firmware just built and flashed.
+      ```
+
+      Not part of this run, and not required for M12: rollback behavior
+      from a deliberately unconfirmed/failing boot -- the mechanism is
+      implemented and Kconfig-enabled (see
+      [ARCHITECTURE.md](ARCHITECTURE.md#ota-m12)'s "Rollback" design) but
+      that specific scenario remains hardware-untested.
 
 ## M13 — Home Assistant Integration
 
