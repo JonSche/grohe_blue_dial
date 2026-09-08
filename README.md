@@ -176,7 +176,7 @@ the reasoning behind every non-obvious decision live in
 | SNTP time sync | ✅ Hardware-validated |
 | Water types — Still / Sparkling / Medium | ✅ Still & Sparkling validated · Medium implemented, unconfirmed on the physical appliance |
 | Firmware version/build metadata | ✅ Implemented, build-verified |
-| OTA firmware updates | ⛔ Built, hardware-tested, then fully reverted — see [`ROADMAP.md`](docs/ROADMAP.md) |
+| OTA firmware updates (Wi-Fi, plain HTTP + shared secret) | ✅ Hardware-validated |
 | Home Assistant integration | 🔜 Planned, always optional |
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the complete milestone-by-milestone
@@ -236,7 +236,7 @@ Implemented:
 - [x] Firmware version/build metadata embedded in every build, logged at boot
 - [x] Wi-Fi OTA firmware updates (local network, plain HTTP + shared-secret
       auth, automatic rollback on a failed boot; USB remains the recovery
-      path) — implemented, hardware validation pending
+      path)
 
 Planned:
 
@@ -257,7 +257,7 @@ Planned:
 | Dispense, stop, water types | ✅ Shipped |
 | Time sync, dispense UI, display sleep | ✅ Shipped |
 | Firmware version/build metadata | ✅ Shipped |
-| OTA firmware updates (Wi-Fi, plain HTTP + shared secret) | 🚧 Implemented, hardware validation pending |
+| OTA firmware updates (Wi-Fi, plain HTTP + shared secret) | ✅ Shipped |
 | Debugging & flashing tooling | 🔜 Optional, not required for v1.0 |
 | Home Assistant integration | 🔜 Planned |
 
