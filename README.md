@@ -174,7 +174,7 @@ the reasoning behind every non-obvious decision live in
 | BLE pairing, reconnect, authenticated dispense/stop | ✅ Hardware-validated |
 | Round UI — progress ring, animations, display sleep | ✅ Hardware-validated |
 | SNTP time sync | ✅ Hardware-validated |
-| Water types — Still / Sparkling / Medium | ✅ Still & Sparkling validated · Medium implemented, unconfirmed on the physical appliance |
+| Water types — Still / Medium / Sparkling | ✅ Hardware-validated |
 | Firmware version/build metadata | ✅ Implemented, build-verified |
 | OTA firmware updates (Wi-Fi, plain HTTP + shared secret) | ✅ Hardware-validated |
 | Home Assistant integration | 🔜 Planned, always optional |
