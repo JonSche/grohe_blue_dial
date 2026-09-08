@@ -1,9 +1,9 @@
 # Roadmap
 
-Milestones for Grohe Dial. The Grohe Blue BLE contract (M3–M9) and the
-core dispense experience (M11) are implemented and hardware-validated;
-remaining milestones extend product scope (M10, M13) and developer/
-production tooling (M12) on top of that foundation.
+Milestones for Grohe Dial. The Grohe Blue BLE contract (M3–M9), the core
+dispense experience (M11), and water-type support (M10) are implemented
+and hardware-validated; remaining milestones extend product scope (M13)
+and developer/production tooling (M12) on top of that foundation.
 
 ## M0 — Raw hardware bring-up ✅
 
@@ -394,13 +394,10 @@ the one remaining type to add.
       section — confirmed at the same ⭐⭐⭐⭐⭐ confidence as the
       characteristic UUIDs and response codes (Android application enum
       decompilation, `grohe_blue_ble/docs/EVIDENCE.md`), not guessed.
-- [ ] **Not yet done from this environment: hardware validation** (dispense
-      Still, Medium, and Sparkling on the physical appliance; confirm no
-      regression to Still/Sparkling or to stop). No physical hardware
-      reachable here, same limitation M11/M11.1 ended on. Build verified
-      clean (`idf.py build`, no new warnings) and every `WaterType` switch
-      confirmed exhaustive (no `default:` label anywhere, so a missing
-      case would already have failed to build).
+- [x] Verified on hardware: Still, Medium, and Sparkling all dispense
+      correctly on the physical appliance, stop/cancel behaves correctly,
+      and Still/Medium/Sparkling selection (the long-press cycle) works
+      as expected -- no regression to the existing dispensing behavior.
 
 ## M11 — Dispense UI Implementation ✅
 
@@ -630,7 +627,7 @@ not basic dispensing, which the dial already handles entirely on its own.
 What "version 1.0" means for this project -- the minimum bar for the
 first production release, not a milestone in itself.
 
-- [ ] M10 completed.
+- [x] M10 completed.
 - [ ] M12 completed.
 - [ ] M13 completed.
 - [ ] Stable hardware validation.
