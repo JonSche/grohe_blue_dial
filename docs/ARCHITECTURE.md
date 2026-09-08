@@ -413,11 +413,14 @@ the Wi-Fi STA interface up or down. Extracted out of what used to be
 `SntpTimeProvider`'s own private, one-shot connect/retry/teardown state
 machine so that any *other* consumer needing Wi-Fi could reuse the same
 session instead of running a second, independent connect/retry
-implementation against the one physical radio this chip has -- an
-experimental OTA update engine was that second consumer for a time (see
-git history around 2026-08 for the full design if it's ever revisited),
-but has since been removed; `SntpTimeProvider` is `WifiConnection`'s only
-consumer today.
+implementation against the one physical radio this chip has. Two
+consumers today, with two different acquisition lifetimes:
+`SntpTimeProvider`'s one-shot boot-time burst (`Acquire()`d, then
+`Release()`d once time sync finishes) and `ota::OtaServer`'s permanent
+acquisition (`AcquireAsync()`d once at boot, never `Release()`d -- see
+"OTA (M12)" below) -- an earlier, HTTPS-based OTA engine was a second
+consumer for a time too (see git history around 2026-08 for that former
+design), removed before this one was built.
 
 **Design, kept general on purpose:** reference-counted
 (`Acquire()`/`AcquireAsync()` increment, `Release()` decrements) rather
@@ -460,6 +463,9 @@ app::App
  |-- time_service::WifiConnection wifi_connection_
  |     depends on: time_service::LocalWifiCredentialsProvider
  |
+ |-- ota::OtaServer ota_server_{wifi_connection_, ota_secret_provider_}
+ |     depends on: ota::LocalOtaSecretProvider
+ |
  '-- grohe_ble::GroheClient grohe_client_{wifi_connection_}
        '-- time_service::SntpTimeProvider time_provider_(wifi_connection_)
 ```
@@ -495,6 +501,115 @@ anything else. While nobody holds an acquisition, no event can be for a
 live cycle -- it can only be leftover noise from the teardown that just
 dropped `ref_count_` to 0 -- so it's dropped unconditionally, before it
 can touch `retry_count_`, `sta_connected_`, or either bit.
+
+## OTA (M12)
+
+Wi-Fi firmware updates -- `idf.py build` on a dev machine, then push the
+result to the dial over the local network, instead of USB for every
+iteration. USB (`idf.py flash`) remains the initial-installation and
+recovery mechanism unconditionally; nothing about OTA changes it or
+depends on it being unavailable.
+
+**Why not the M12.4 HTTPS design this replaces:** an earlier OTA engine
+(`esp_https_ota`, TLS) was built, reached real hardware, and failed
+there with `mbedtls_ssl_setup()` returning `MBEDTLS_ERR_SSL_ALLOC_FAILED`
+-- root-caused to heap fragmentation: `free=25648,
+largest_free_block=9216` bytes, not enough contiguous space for
+mbedTLS's ~16.4 KB `in_buf` handshake allocation, on an ESP32-C3 with no
+PSRAM and Wi-Fi + BLE (NimBLE) + LVGL all concurrently resident. That
+engine was fully reverted (see git history and the "Wi-Fi connectivity"
+section above). This design sidesteps the failure mode entirely rather
+than working around it: **plain HTTP, no TLS, no mbedTLS allocation of
+any kind in the transport.**
+
+**Transport**: `ota::OtaServer` (`components/ota/`), a small
+`esp_http_server` instance with two routes:
+- `GET /version` -- unauthenticated, returns
+  `firmware_info::Version()`/`GitCommit()`/`GitBranch()` as plain text.
+  Read-only, non-sensitive; used by `scripts/ota.sh` to confirm the
+  device is reachable and to report what it rebooted into.
+- `POST /ota` -- requires an `X-OTA-Token` header matching the
+  configured shared secret (see "Security" below); on success, streams
+  the request body straight into `esp_ota_write()`, `kRecvChunkSize`
+  (4 KiB) at a time, via `esp_ota_get_next_update_partition()` --
+  **never buffers the full image**, matching this chip's memory
+  constraints the same way M3.2's display partial-buffer decision did.
+  `esp_ota_begin()` is given the exact `Content-Length` up front, so it
+  erases only the flash region this image needs, not the whole
+  partition.
+
+**Flow**, matching `esp_ota_ops`'s own idiom exactly (`esp_https_ota`
+itself is just a thin wrapper around the same calls -- this component
+calls them directly instead):
+`esp_ota_get_next_update_partition()` (find the inactive slot) ->
+`esp_ota_begin()` -> repeated `httpd_req_recv()`/`esp_ota_write()` ->
+`esp_ota_end()` (validates the image -- app descriptor magic byte, chip
+ID, CRC) -> `esp_ota_set_boot_partition()` -> respond `200 OK` -> a
+short `vTaskDelay()` so the response actually reaches the client ->
+`esp_restart()`. Every failure path (`esp_ota_begin`/`_write`/`_end`/
+`_set_boot_partition`, or a socket read error) responds with an
+appropriate HTTP error and returns without ever calling
+`esp_ota_set_boot_partition()` -- the currently running partition is
+never touched by a failed update.
+
+**Partitions**: reuses `ota_0`/`ota_1`/`otadata` exactly as they've
+existed since M9 (see "Flash layout (M9)" above) -- no partition table
+change was needed for this milestone.
+
+**Rollback**: `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`
+(`sdkconfig.defaults`, reinstated for this milestone). A freshly-flashed
+OTA image boots in `ESP_OTA_IMG_PENDING_VERIFY` state; if it crashes,
+watchdogs, or loses power before confirming itself, the bootloader
+automatically reverts to the previous working image on the next boot.
+`ota::ConfirmBootValid()` (`ota_rollback.cpp`, wrapping
+`esp_ota_mark_app_valid_cancel_rollback()`) is called once from
+`App::Run()`, but deliberately *after* display, UI, encoder, and BLE
+have all finished initializing -- not at the top of `Run()`, unlike
+M12.4's equivalent call. This is a genuine improvement over that design:
+confirming any earlier would mean a crash during startup itself (the
+exact class of bug rollback exists to catch) could never trigger a
+rollback, since the image would already have been marked valid before
+the crash occurred.
+
+**Wi-Fi lifetime**: `OtaServer` is `WifiConnection`'s second consumer
+(see "Wi-Fi connectivity" above), but with a different acquisition
+shape than `SntpTimeProvider`'s one-shot burst -- `Init()` calls
+`AcquireAsync()` once and never `Release()`s, so Wi-Fi stays connected
+for the whole process lifetime whenever a device is powered, keeping
+the OTA endpoint reachable on demand rather than only in a brief window
+after boot. This is still non-blocking and non-fatal: `Init()` returns
+immediately regardless of how long Wi-Fi takes to associate or whether
+it ever does, and every other subsystem (display, encoder, BLE) starts
+up exactly as before -- OTA is not a runtime dependency, the same
+principle `WifiConnection` already enforces for every consumer. A
+long-lived Wi-Fi outage exceeding `WifiConnection`'s own cumulative
+retry budget (`kMaxWifiRetries`, currently 5) leaves the OTA endpoint
+unreachable until the next reboot resets the retry cycle -- acceptable
+for a local, developer-facing feature; documented rather than solved,
+matching this class's own existing "stale event" precedent.
+
+**Security**: a single shared secret (`ota::OtaSecretProvider`,
+gitignored `ota_secret_local.hpp` -- mirrors
+`grohe_ble::CredentialsProvider`/`time_service::WifiCredentialsProvider`
+exactly, same local-header pattern, same "empty means disabled, never
+means unauthenticated" default), checked with a best-effort
+constant-time comparison and sent as a header value, never logged.
+**This is not Internet-grade security**: no TLS, so the token is sent
+in the clear and the firmware image itself is not encrypted in transit;
+no rate limiting; no replay protection. It is appropriate for a
+trusted local Wi-Fi network -- the threat model is "don't let an
+unauthenticated device on my LAN flash this dial," not "resist an
+attacker who can already observe my Wi-Fi traffic." See `SECURITY.md`.
+`GET /version` intentionally has no auth -- it returns nothing
+sensitive, and both `scripts/ota.sh` and casual debugging benefit from
+it working without the token.
+
+**Developer workflow**: `scripts/ota.sh <device-ip>` -- locates
+`build/grohe_dial.bin`, reads the shared secret from the same
+`ota_secret_local.hpp` the firmware itself reads (one file, one place
+to edit), uploads with `curl`, checks the HTTP status, then polls
+`GET /version` for up to 30 s to confirm the device came back and
+report what it's now running.
 
 ## Dispense UI (M11)
 

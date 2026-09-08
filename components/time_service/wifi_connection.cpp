@@ -328,6 +328,12 @@ esp_err_t WifiConnection::Init() {
     return ESP_ERR_NO_MEM;
   }
 
+  waiters_mutex_ = xSemaphoreCreateMutex();
+  if (waiters_mutex_ == nullptr) {
+    ESP_LOGE(kTag, "xSemaphoreCreateMutex failed");
+    return ESP_ERR_NO_MEM;
+  }
+
   return ESP_OK;
 }
 
@@ -437,30 +443,49 @@ void WifiConnection::AcquireAsync(std::function<void()> on_ready,
     xEventGroupClearBits(events_, kConnectedBit | kFailedBit);
     if (StartConnecting() != ESP_OK) {
       // Synchronous setup failure, on this calling task -- resolve
-      // immediately, no async event is ever coming for this cycle.
+      // immediately, no async event is ever coming for this cycle. No
+      // other waiter can exist yet either (this is the first-ever caller
+      // of a brand new cycle, and nothing queues into pending_waiters_
+      // before this point), so there's nothing else to notify.
       if (on_failed) {
         on_failed();
       }
       return;
     }
-    pending_ready_ = std::move(on_ready);
-    pending_failed_ = std::move(on_failed);
-    return;
+    // Falls through to the same "resolve now, or queue" decision every
+    // later caller takes below -- this caller's own waiter is queued
+    // there while genuinely still connecting, exactly like any other
+    // pre-resolution caller. Deliberately not special-cased into an
+    // unconditional queue here: see waiters_mutex_'s own comment for why
+    // that would be a race against a resolution landing between
+    // StartConnecting() returning and this caller actually queuing.
   }
 
+  // Whether this is the first caller (just started connecting above) or
+  // a later one joining an in-flight or just-resolved cycle: check
+  // events_'s bits and either resolve immediately or queue, atomically
+  // with Resolve()'s own "mark resolved, then drain" -- see
+  // waiters_mutex_'s own comment in the header for exactly which race
+  // this closes.
+  xSemaphoreTake(waiters_mutex_, portMAX_DELAY);
   const EventBits_t bits = xEventGroupGetBits(events_);
   if (bits & kConnectedBit) {
+    xSemaphoreGive(waiters_mutex_);
     if (on_ready) {
       on_ready();
     }
-  } else if (bits & kFailedBit) {
+    return;
+  }
+  if (bits & kFailedBit) {
+    xSemaphoreGive(waiters_mutex_);
     if (on_failed) {
       on_failed();
     }
+    return;
   }
-  // Still connecting: see the header's own comment -- not reachable
-  // today (this non-blocking form has exactly one caller, which only
-  // ever calls it once).
+  pending_waiters_.push_back(
+      AsyncWaiter{std::move(on_ready), std::move(on_failed)});
+  xSemaphoreGive(waiters_mutex_);
 }
 
 bool WifiConnection::Acquire(TickType_t timeout) {
@@ -712,15 +737,35 @@ void WifiConnection::HandleWifiOrIpEvent(esp_event_base_t base, int32_t id,
 void WifiConnection::Resolve(bool connected) {
   ESP_LOGI(kTag, "Resolve: before: success=%d bits=0x%02x", connected,
            static_cast<unsigned>(xEventGroupGetBits(events_)));
+
+  // Setting the bit and draining pending_waiters_ under the same lock
+  // AcquireAsync() takes for its own "already resolved?" check is what
+  // makes the two atomic with respect to each other -- see
+  // waiters_mutex_'s own comment in the header. std::vector::swap() just
+  // exchanges internal pointers/size (no element copies, no allocation),
+  // so this is a short, bounded critical section even with many waiters.
+  std::vector<AsyncWaiter> waiters;
+  xSemaphoreTake(waiters_mutex_, portMAX_DELAY);
   xEventGroupSetBits(events_, connected ? kConnectedBit : kFailedBit);
-  ESP_LOGI(kTag, "Resolve: after: bits=0x%02x",
-           static_cast<unsigned>(xEventGroupGetBits(events_)));
-  std::function<void()> callback =
-      connected ? std::move(pending_ready_) : std::move(pending_failed_);
-  pending_ready_ = nullptr;
-  pending_failed_ = nullptr;
-  if (callback) {
-    callback();
+  waiters.swap(pending_waiters_);
+  xSemaphoreGive(waiters_mutex_);
+
+  ESP_LOGI(kTag, "Resolve: after: bits=0x%02x waiters=%u",
+           static_cast<unsigned>(xEventGroupGetBits(events_)),
+           static_cast<unsigned>(waiters.size()));
+
+  // Invoked outside the lock, one at a time, each exactly once. These are
+  // arbitrary caller-supplied callbacks (ota::OtaServer::StartServer(),
+  // SntpTimeProvider::HandleWifiReady()/HandleWifiFailed(), ...) that may
+  // themselves call AcquireAsync()/Release() synchronously -- holding
+  // waiters_mutex_ across them would risk a self-deadlock (this same
+  // task re-taking a mutex it still holds) at worst, and needless
+  // contention with every other waiter's own callback at best.
+  for (AsyncWaiter& waiter : waiters) {
+    std::function<void()>& callback = connected ? waiter.on_ready : waiter.on_failed;
+    if (callback) {
+      callback();
+    }
   }
 }
 

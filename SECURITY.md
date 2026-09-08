@@ -40,6 +40,17 @@ Security reports are in scope for:
   [`components/grohe_ble/`](components/grohe_ble/) (Grohe appliance
   credentials) and [`components/time_service/`](components/time_service/)
   (Wi-Fi credentials, used only as a one-shot SNTP time source).
+- **OTA** ([`components/ota/`](components/ota/)): the local-network Wi-Fi
+  firmware-update endpoint — shared-secret handling, and any memory-safety
+  issue in request parsing or the flash-write path.
+  **By design, this endpoint is plain HTTP with no TLS and a single
+  shared secret** — appropriate for a trusted local Wi-Fi network, not an
+  Internet-facing one; see
+  [ARCHITECTURE.md](docs/ARCHITECTURE.md#ota-m12) for the full rationale
+  and threat model. Reports that this isn't TLS-encrypted are already
+  known and out of scope; reports of a way to bypass the shared-secret
+  check entirely, or a memory-safety bug in the upload handler, are very
+  much in scope.
 
 Out of scope: vulnerabilities in ESP-IDF, NimBLE, mbedTLS, or any other
 upstream dependency this firmware builds on — please report those to their

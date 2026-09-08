@@ -198,12 +198,14 @@ idf.py build flash monitor
 ```
 
 > [!IMPORTANT]
-> Real appliance/Wi-Fi credentials are never committed. Copy the two
+> Real appliance/Wi-Fi/OTA credentials are never committed. Copy the three
 > `*_local.hpp.example` files under
-> [`components/grohe_ble/`](components/grohe_ble/) and
-> [`components/time_service/`](components/time_service/) to their
-> non-`.example` names and fill in your own values before building against a
-> real appliance.
+> [`components/grohe_ble/`](components/grohe_ble/),
+> [`components/time_service/`](components/time_service/), and
+> [`components/ota/`](components/ota/) to their non-`.example` names before
+> building at all (each has a working empty-string default; only Grohe/
+> Wi-Fi need real values to actually connect to anything, and OTA needs a
+> real secret only to enable Wi-Fi firmware updates).
 
 Expect a boot log that looks like this:
 
@@ -232,6 +234,9 @@ Implemented:
 - [x] SNTP time synchronization (a one-shot Wi-Fi connection at boot; not a
       runtime dependency for anything else)
 - [x] Firmware version/build metadata embedded in every build, logged at boot
+- [x] Wi-Fi OTA firmware updates (local network, plain HTTP + shared-secret
+      auth, automatic rollback on a failed boot; USB remains the recovery
+      path) — implemented, hardware validation pending
 
 Planned:
 
@@ -252,8 +257,8 @@ Planned:
 | Dispense, stop, water types | ✅ Shipped |
 | Time sync, dispense UI, display sleep | ✅ Shipped |
 | Firmware version/build metadata | ✅ Shipped |
-| OTA firmware updates | ⛔ Reverted |
-| Debugging & flashing tooling | 🚧 In progress |
+| OTA firmware updates (Wi-Fi, plain HTTP + shared secret) | 🚧 Implemented, hardware validation pending |
+| Debugging & flashing tooling | 🔜 Optional, not required for v1.0 |
 | Home Assistant integration | 🔜 Planned |
 
 [`docs/ROADMAP.md`](docs/ROADMAP.md) is organized as one section per

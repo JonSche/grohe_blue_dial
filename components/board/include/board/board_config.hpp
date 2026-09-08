@@ -48,10 +48,10 @@ enum class DisplayRotation {
   k270,  // 270 degrees clockwise (equivalently, 90 degrees counter-clockwise).
 };
 
-// Current enclosure mounts the LCD rotated 90 degrees clockwise from the
-// panel's native upright orientation. Change only this line to match a
+// Current enclosure mounts the LCD in its native upright orientation --
+// hardware-verified during M12 bring-up. Change only this line to match a
 // different physical mounting -- no other file needs to change.
-inline constexpr DisplayRotation kDisplayRotation = DisplayRotation::k90;
+inline constexpr DisplayRotation kDisplayRotation = DisplayRotation::k0;
 
 // --- Rotary encoder + button -------------------------------------------
 inline constexpr gpio_num_t kEncoderPinPhaseA = GPIO_NUM_7;

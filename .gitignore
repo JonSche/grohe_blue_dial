@@ -15,3 +15,8 @@ components/grohe_ble/include/grohe_ble/credentials_local.hpp
 # committed. See
 # components/time_service/include/time_service/wifi_credentials_local.hpp.example.
 components/time_service/include/time_service/wifi_credentials_local.hpp
+
+# Real OTA shared secret/token (gates the local-network Wi-Fi OTA
+# endpoint) -- never committed. See
+# components/ota/include/ota/ota_secret_local.hpp.example.
+components/ota/include/ota/ota_secret_local.hpp

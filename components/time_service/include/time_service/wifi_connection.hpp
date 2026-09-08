@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <functional>
+#include <vector>
 
 #include "esp_err.h"
 #include "esp_event.h"
@@ -9,6 +10,7 @@
 #include "esp_wifi_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "time_service/wifi_credentials.hpp"
 
 // WifiConnection: the one place this firmware brings the Wi-Fi STA
@@ -18,7 +20,10 @@
 // share the *same* session instead of running a second, independent
 // connect/retry implementation against the one physical radio this chip
 // has -- see docs/ARCHITECTURE.md#wifi-connectivity for the full design.
-// SntpTimeProvider is the only consumer today.
+// Two consumers today: SntpTimeProvider's one-shot boot-time burst and
+// ota::OtaServer's permanent acquisition (see ota_server.hpp) -- both are
+// genuine AcquireAsync() callers of a single shared connection attempt,
+// which is exactly the case AcquireAsync()'s own comment below documents.
 //
 // Event-driven internally, exactly like the class this was extracted
 // from: no dedicated task; everything reacts to WIFI_EVENT/IP_EVENT on
@@ -51,13 +56,19 @@
 // a new cycle's state is reset, matching retry_count_/sta_connected_.
 //
 // This also means two callers racing the same 0->1 (first-acquirer)
-// transition -- not reachable in this codebase's real usage: the one
-// current caller (SntpTimeProvider::Init()) only ever runs on the app
-// task, never concurrently with itself -- could in theory observe a bit
-// left over from *two* cycles back, since the non-first caller's
-// xEventGroupWaitBits() doesn't wait for the first caller to reach the
-// clear. Documented, not fixed, since there is no real caller to fix it
-// for.
+// transition -- today's two real AcquireAsync() callers (OtaServer::
+// Init(), SntpTimeProvider::Init(), both via App::Run()) only ever run
+// sequentially on the same app task, never concurrently with each other,
+// so this specific race remains unreached in practice -- could in theory
+// observe a bit left over from *two* cycles back, since a later caller's
+// own bit check (AcquireAsync()'s "already resolved?" check, or
+// Acquire()'s xEventGroupWaitBits()) doesn't wait for the first caller to
+// reach the clear. Documented, not fixed, since there is still no real
+// caller landing concurrently with a fresh first-acquirer to fix it for
+// -- unlike the "second caller arrives before this cycle resolves" case
+// (see AcquireAsync() below), which two real, sequential-but-both-async
+// callers made genuinely reachable, and which pending_waiters_/
+// waiters_mutex_ below fix directly.
 namespace time_service {
 
 class WifiConnection {
@@ -90,15 +101,20 @@ class WifiConnection {
   //
   // on_ready()/on_failed() -- each optional, pass nullptr to skip -- run
   // on the default event loop's own task the moment *this* acquisition
-  // resolves (or inline, synchronously, if it resolves immediately --
-  // already connected, or a synchronous esp_wifi_*/esp_netif_* setup
-  // failure). At most one pending (on_ready, on_failed) pair is tracked
-  // at a time; the one caller of this non-blocking form today
-  // (SntpTimeProvider) only ever calls it once, at boot -- a second,
-  // concurrent AcquireAsync() call while a first is still unresolved is
-  // not reachable in this codebase and its own callbacks would simply
-  // not fire (Acquire()'s blocking wait below is unaffected by this,
-  // since it doesn't rely on the callback mechanism at all).
+  // resolves (or inline, synchronously, on the calling task, if it
+  // resolves immediately -- already connected, already failed, or a
+  // synchronous esp_wifi_*/esp_netif_* setup failure).
+  //
+  // Multiple concurrent callers are fully supported -- an arbitrary
+  // number of pending (on_ready, on_failed) pairs are tracked at once
+  // (pending_waiters_ below), not just one. A caller arriving while a
+  // connection attempt is already in flight (whether it's the first
+  // caller that just started it, or a later one) is queued and notified
+  // -- exactly once -- when that attempt resolves, same as every other
+  // pending caller; a caller arriving after this cycle already resolved
+  // is told immediately, synchronously, on the calling task. Safe to
+  // call from multiple different tasks concurrently -- see
+  // waiters_mutex_'s own comment for the synchronization this relies on.
   //
   // Every call -- resolved successfully or not -- holds one reference;
   // call Release() exactly once per AcquireAsync()/Acquire() call,
@@ -156,8 +172,45 @@ class WifiConnection {
   // the disconnected event itself carries no auth mode.
   bool bssid_established_ = false;
   wifi_auth_mode_t last_authmode_ = WIFI_AUTH_OPEN;
-  std::function<void()> pending_ready_;
-  std::function<void()> pending_failed_;
+
+  // One entry per in-flight AcquireAsync() call still waiting on this
+  // cycle's resolution -- replaces what used to be a single (on_ready,
+  // on_failed) pair, which silently dropped every caller after the
+  // first if a second one arrived before the connection resolved (the
+  // M12 bug this fixes: ota::OtaServer::Init() and
+  // SntpTimeProvider::Init() both now call AcquireAsync() during the
+  // same boot, and Wi-Fi association+DHCP reliably outlasts the display/
+  // encoder init that runs between them).
+  struct AsyncWaiter {
+    std::function<void()> on_ready;
+    std::function<void()> on_failed;
+  };
+  std::vector<AsyncWaiter> pending_waiters_;
+
+  // Guards pending_waiters_, and jointly with it, the "has this cycle
+  // already resolved?" check against events_'s own bits (see
+  // AcquireAsync()/Resolve() in the .cpp). AcquireAsync() can run on any
+  // calling task, while Resolve() always runs on the default event
+  // loop's own task, so a caller's "check whether we're already
+  // resolved, else queue" and Resolve()'s "mark resolved, then drain
+  // every queued waiter" must be atomic with respect to each other --
+  // without this lock serializing the two, a waiter could be queued
+  // just after a drain already ran for this cycle (stranded until some
+  // *later*, unrelated cycle resolves) if the two steps interleaved the
+  // other way. Taking this same lock on both sides is what rules that
+  // interleaving out entirely: whichever of a given AcquireAsync() call
+  // and Resolve() takes the lock first is fully serialized before the
+  // other can even read events_'s bits or pending_waiters_.
+  //
+  // A plain (non-recursive) mutex, not a critical section: the protected
+  // region is always just a bit check plus a vector push_back/swap, and
+  // is always released *before* any callback in this class ever runs --
+  // see Resolve()'s own comment for why holding it across an arbitrary
+  // caller-supplied callback would risk a self-deadlock (a callback that
+  // itself calls AcquireAsync()/Release() synchronously, on the same
+  // task already holding this lock) instead of just calling back into
+  // already-free code.
+  SemaphoreHandle_t waiters_mutex_ = nullptr;
 
   // The one field genuinely touched from any task: Acquire()/Release()/
   // AcquireAsync() all read-modify-write it to decide "am I the first

@@ -5,6 +5,7 @@
 #include "firmware_info/firmware_info.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "ota/ota_rollback.hpp"
 
 namespace app {
 namespace {
@@ -46,6 +47,12 @@ void App::Run() {
   // through it -- see wifi_connection.hpp's own comment.
   ESP_ERROR_CHECK(wifi_connection_.Init());
 
+  // M12: non-blocking -- registers a permanent Wi-Fi acquisition and
+  // starts the OTA HTTP server once it comes up (or logs and does
+  // nothing if no OTA secret is configured). Never gates the rest of
+  // this startup sequence -- see ota_server.hpp's own comment.
+  ota_server_.Init();
+
   ESP_ERROR_CHECK(display_.Init());
 
   if (display::Gc9a01Display::Lock()) {
@@ -64,6 +71,13 @@ void App::Run() {
   if (grohe_client_.Init() != ESP_OK) {
     ESP_LOGE(kTag, "GroheClient::Init() failed -- continuing without BLE");
   }
+
+  // M12: only now, after every subsystem above has finished initializing
+  // -- not at the top of Run() -- so a crash during startup itself still
+  // leaves this boot's OTA image unconfirmed and correctly triggers the
+  // bootloader's automatic rollback (see ota_rollback.hpp). A no-op
+  // outside a pending-verify boot (i.e. every normal boot).
+  ota::ConfirmBootValid();
 
   ESP_LOGI(kTag, "Startup complete");
 

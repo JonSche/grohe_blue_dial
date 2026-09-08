@@ -4,6 +4,8 @@
 #include "display/gc9a01_display.hpp"
 #include "encoder/encoder_input.hpp"
 #include "grohe_ble/grohe_client.hpp"
+#include "ota/ota_secret.hpp"
+#include "ota/ota_server.hpp"
 #include "time_service/wifi_connection.hpp"
 #include "time_service/wifi_credentials.hpp"
 #include "ui/ui_manager.hpp"
@@ -54,11 +56,18 @@ class App {
   // can take it by reference in its own constructor (member init order
   // follows declaration order, not the constructor-argument order below).
   // Reference-counted rather than assuming exactly one consumer -- see
-  // wifi_connection.hpp's own comment -- even though SntpTimeProvider is
-  // currently the only one; a former second consumer (an OTA update
-  // engine) was removed, but the design still holds for any future one.
+  // wifi_connection.hpp's own comment. Two consumers today:
+  // SntpTimeProvider's one-shot boot-time burst (via grohe_client_ below)
+  // and ota_server_'s permanent, never-released acquisition (M12) -- the
+  // design already anticipated exactly this second case.
   time_service::LocalWifiCredentialsProvider wifi_credentials_provider_;
   time_service::WifiConnection wifi_connection_{wifi_credentials_provider_};
+
+  // M12: local-network Wi-Fi OTA endpoint -- see components/ota/ and
+  // docs/ARCHITECTURE.md's "OTA" section. Independent of BLE/dispensing;
+  // Init() is non-blocking and never gates the rest of startup.
+  ota::LocalOtaSecretProvider ota_secret_provider_;
+  ota::OtaServer ota_server_{wifi_connection_, ota_secret_provider_};
 
   grohe_ble::GroheClient grohe_client_{wifi_connection_};
 };

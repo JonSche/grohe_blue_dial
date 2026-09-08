@@ -1,9 +1,9 @@
 # Roadmap
 
 Milestones for Grohe Dial. The Grohe Blue BLE contract (M3–M9), the core
-dispense experience (M11), and water-type support (M10) are implemented
-and hardware-validated; remaining milestones extend product scope (M13)
-and developer/production tooling (M12) on top of that foundation.
+dispense experience (M11), water-type support (M10), and Wi-Fi OTA
+updates (M12) are implemented and hardware-validated; the remaining
+milestone (M13) extends product scope on top of that foundation.
 
 ## M0 — Raw hardware bring-up ✅
 
@@ -525,27 +525,28 @@ reinitialisation, no LVGL pause, no framebuffer change, only
       and restarts the timer, and it stays on for the entire duration of
       a dispense/stop even when that exceeds 60 s.
 
-## M12 — Development & Deployment
+## M12 — Development & Deployment ✅
 
-Developer- and release-focused tooling -- building, flashing, debugging,
-and shipping this firmware repeatably -- rather than further product
-features. Ordered by development priority, not release priority: reliable
-debugging is worth more than an OTA update mechanism while firmware is
-still under active development. The OTA-ready partition table itself
-was delivered in M9 and remains in place; M12.4 (an OTA mechanism on
-top of it) was built and later fully reverted -- see its own entry
-below.
+Deliberately narrow scope: the one real requirement is **reliable
+firmware updates over Wi-Fi, with USB retained as the initial-
+installation and recovery mechanism** -- not a generic ESPHome-style
+integration or a complex flashing framework (both considered and
+rejected; see [ARCHITECTURE.md](ARCHITECTURE.md#ota-m12) for the
+investigation). M12.4 delivers that. M12.1/M12.2 remain useful,
+lower-priority tooling ideas, not blockers -- `idf.py build flash
+monitor` and `scripts/ota.sh` already cover simple flashing and Wi-Fi
+updates respectively; JTAG/OpenOCD debugging is a nice-to-have this
+milestone doesn't require.
 
-### M12.1 — Debugging
+### M12.1 — Debugging (optional, not required for v1.0)
 
 - [ ] JTAG/OpenOCD setup.
 - [ ] VS Code launch configuration.
 - [ ] Debugging documentation.
 
-### M12.2 — Flashing
+### M12.2 — Flashing (optional, not required for v1.0)
 
-- [ ] Simple flashing workflow.
-- [ ] Flash helper script(s).
+- [ ] Flash helper script(s) beyond `idf.py flash`/`scripts/ota.sh`.
 - [ ] Automatic serial-port detection where practical.
 
 ### M12.3 — Build & Release ✅
@@ -586,21 +587,77 @@ design.
       `idf.py monitor` would show, built from the same values already
       confirmed correct via the generated header/build log.
 
-### M12.4 — OTA (reverted)
+### M12.4 — OTA
 
-An OTA update mechanism (`components/ota/`, `esp_https_ota`/
-`esp_ota_ops`-based, plus a developer-only manual trigger and bootloader
-rollback) was built, hardware-tested, and then fully removed -- see git
-history for the complete former design if it's ever revisited. Removed
-in full: the `ota` component, the developer validation hook (and its
-supporting `EncoderInput::IsHeldFor()`), `CONFIG_BOOTLOADER_APP_ROLLBACK_
-ENABLE`, and the corresponding `ARCHITECTURE.md` sections. Kept: the
-OTA-ready partition table from M9 (still the current flash layout --
-removing OTA doesn't require a second partition migration) and M12.3's
-firmware version metadata, which OTA had reused but doesn't own.
-`time_service::WifiConnection` (originally extracted so OTA and SNTP
-could share one Wi-Fi session) is also kept -- `SntpTimeProvider` is its
-only consumer now; see [ARCHITECTURE.md](ARCHITECTURE.md#wifi-connectivity).
+A first OTA mechanism (`esp_https_ota`/TLS) was built, hardware-tested,
+and fully reverted after failing on real hardware with a heap-
+fragmentation-driven mbedTLS allocation failure -- see git history and
+[ARCHITECTURE.md](ARCHITECTURE.md#ota-m12) for the root cause. This
+replacement deliberately avoids TLS entirely rather than working around
+that failure: a small `esp_http_server`-based endpoint, plain HTTP,
+shared-secret authentication, streamed straight into `esp_ota_write()`
+with no full-image buffering. See
+[ARCHITECTURE.md](ARCHITECTURE.md#ota-m12) for the full design
+(transport, flow, partitions, rollback, security posture, and the
+`scripts/ota.sh` developer workflow).
+
+- [x] New `components/ota/` (`ota::OtaServer`): `GET /version`
+      (unauthenticated, read-only) and `POST /ota` (requires an
+      `X-OTA-Token` header, constant-time compared against a shared
+      secret) -- reuses `esp_ota_get_next_update_partition()`/
+      `esp_ota_begin()`/`esp_ota_write()`/`esp_ota_end()`/
+      `esp_ota_set_boot_partition()` directly, no custom OTA protocol.
+      Never buffers the full image (4 KiB streaming chunks straight from
+      the socket into flash).
+- [x] Shared secret via `ota::OtaSecretProvider` -- gitignored
+      `ota_secret_local.hpp`, mirroring `grohe_ble`/`time_service`'s
+      existing local-credentials pattern exactly. Empty secret disables
+      the OTA endpoint entirely rather than ever accepting an
+      unauthenticated upload.
+- [x] `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` reinstated
+      (`sdkconfig.defaults`). `ota::ConfirmBootValid()` is called from
+      `App::Run()` only after display/UI/encoder/BLE have all finished
+      initializing -- a genuine improvement over the earlier M12.4
+      design, which confirmed too early to catch a startup-time crash.
+- [x] `OtaServer` is a second, permanent `WifiConnection` consumer
+      (`AcquireAsync()`d once, never released) -- Wi-Fi stays connected
+      for the whole process lifetime so the endpoint is reachable on
+      demand, not just briefly after boot. Still fully non-blocking and
+      non-fatal: every other subsystem starts up exactly as before
+      regardless of Wi-Fi's state.
+- [x] `scripts/ota.sh <device-ip>`: locates `build/grohe_dial.bin`,
+      reads the shared secret from the same local header the firmware
+      reads, uploads with `curl`, checks the HTTP result, and polls
+      `/version` to confirm the reboot.
+- [x] Reused the OTA-ready partition table from M9 unchanged (`ota_0`/
+      `ota_1`/`otadata`) and M12.3's firmware version metadata
+      (`firmware_info::Version()`/`GitCommit()`, read by `/version`).
+- [x] Verified: clean `idf.py build` (including with the rollback
+      Kconfig applied); scope diff confirms zero BLE/Grohe-protocol/
+      dispense/DialController/UI/display-rotation files touched.
+- [x] Verified on hardware: USB-flashed as the initial install; Wi-Fi
+      connects and the OTA endpoint comes up; a full `scripts/ota.sh`
+      Wi-Fi OTA update completed and the device rebooted into the new
+      image, `/version` confirmed before and after; USB flashing still
+      works afterward as recovery. Display (upright, `k0` -- see
+      [board_config.hpp](../components/board/include/board/board_config.hpp)),
+      encoder, button, the BLE connection to the Grohe Blue, and Still/
+      Medium/Sparkling dispensing plus stop/cancel all confirmed working
+      post-update, with no regressions.
+- [x] Hardware bring-up also caught and fixed a real bug in
+      `time_service::WifiConnection`, not specific to OTA itself:
+      `AcquireAsync()` tracked only one pending caller at a time, so a
+      second concurrent consumer's callback was silently dropped rather
+      than ever invoked. `OtaServer` becoming Wi-Fi's first consumer this
+      milestone made that reachable for the first time --
+      `SntpTimeProvider`'s callback was the one being lost, so SNTP time
+      sync never completed even though Wi-Fi itself connected correctly
+      (the dial stayed on "Synchronisierung..."). Fixed with a proper
+      multi-waiter queue guarded by a mutex that's always released before
+      any callback runs (no lock held across arbitrary caller code, no
+      re-entrancy/deadlock risk) -- see
+      [ARCHITECTURE.md](ARCHITECTURE.md#wifi-connectivity). Time sync
+      confirmed completing on hardware after the fix.
 
 ## M13 — Home Assistant Integration
 
@@ -628,7 +685,7 @@ What "version 1.0" means for this project -- the minimum bar for the
 first production release, not a milestone in itself.
 
 - [x] M10 completed.
-- [ ] M12 completed.
+- [x] M12 completed.
 - [ ] M13 completed.
 - [ ] Stable hardware validation.
 - [ ] Reliable flashing workflow.
