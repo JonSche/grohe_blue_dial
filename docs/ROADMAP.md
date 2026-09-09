@@ -975,6 +975,91 @@ storyboard at real 240 px proportions.
       hardware; `hint_label_` has no fixed width/wrap configured, so it
       cannot truncate text at the widget level either way.
 
+### M14 — RAM & Heap Optimization ✅
+
+Follow-up to the M13.3 hardware investigation: MQTT frequently failed to
+connect or crashed with an uncaught `std::bad_alloc` while publishing HA
+Discovery configs. A systematic RAM/heap forensics pass (per-checkpoint
+`[MEM]` logging via the new `components/mem_diag/` helper, kept in the
+tree as permanent lightweight diagnostics) traced this to the ESP32-C3's
+internal heap simply being too tight by the time BLE + Wi-Fi + MQTT +
+OTA + Provisioning are all resident at once -- not a network or protocol
+bug. This milestone is the resulting, individually A/B-tested RAM
+recovery effort; see `sdkconfig.defaults`'s own per-candidate comments
+for the full reasoning, measured numbers, and evidence behind each one.
+
+- [x] **OTA/httpd task stack**: `6144 → 4096` B
+      (`components/ota/ota_server.cpp`). Real measured peak usage
+      ~612-2012 B; no OTA/httpd-specific fault across a 4-run A/B series.
+      MQTT's own task stack was tested at the same reduction and
+      **explicitly reverted** -- 4096 B reproducibly prevented
+      `MQTT_EVENT_CONNECTED` from ever being reached (0/5 runs), while
+      6144 B connected in 7/7 boot cycles across 2 runs. **MQTT task
+      stack intentionally stays at its library default, 6144 B.**
+- [x] **NimBLE roles**: Peripheral/Broadcaster/Observer disabled, Central
+      kept -- this dial only ever scans and connects as a GATT client,
+      never advertises (`ble_gap_adv_start`/`ble_gatts_*`: zero call
+      sites in `components/grohe_ble/`).
+- [x] **BLE scan/filter buffers reduced** for a single-target,
+      stop-on-first-match scan (`ble_gap_disc_cancel()` in
+      `BleManager::OnDeviceFound()`): advertising-report flow-control
+      queue, scan duplicate-address cache, and the (unused, no extended
+      advertising) BLE 5.0 duplicate filter.
+- [x] **`BT_CTRL_BLE_MAX_ACT`**: `6 → 2` controller activity instances
+      (one scan, one connection -- this firmware never advertises or
+      uses periodic-adv sync). ~3.3 KB.
+- [x] **NimBLE MSYS/ACL/HCI event buffer pools** resized for a single
+      low-throughput peripheral connection instead of the library's
+      busy-multi-connection default. **~13.6 KB -- the single largest
+      contributor**, independently confirmed against the Kconfig's own
+      documented per-buffer costs.
+- [x] **`BT_NIMBLE_MAX_CCCDS`**: `8 → 1` (this firmware subscribes to
+      exactly one notification characteristic).
+- [x] **~20 KB internal RAM recovered** in total (measured consistently
+      across `BLE_INITIALIZED`/`MQTT_STARTED`/`PROVISIONING_INIT`
+      checkpoints); `BLE_PRE_INIT → BLE_INITIALIZED` (NimBLE's own
+      init-time cost) fell from ~64.4 KB to ~46.2 KB.
+- [x] **The `std::bad_alloc` HA Discovery crash did not reproduce** in
+      any of ~13 post-optimization hardware test runs in this
+      investigation (5 dedicated Discovery-publish stress boots, a
+      5-minute continuous-operation soak test, and several others) --
+      `MQTT_DISCOVERY_DONE` now consistently lands with several KB of
+      free internal heap and a multi-KB largest contiguous block, versus
+      low-hundreds-of-bytes/a sub-1.5 KB largest block beforehand.
+      Reported as "no longer reproducible under test," not as a formal
+      proof the underlying race is structurally impossible.
+- [x] **Unplanned side effect**: the pre-existing Provisioning
+      `httpd_start()` failure (`ESP_ERR_HTTPD_TASK`, present since the
+      M13.3 MQTT-before-Provisioning startup reorder) did not reproduce
+      in any of the 11 test runs since the NimBLE buffer-pool reduction
+      landed -- plausibly explained by the extra headroom, not
+      independently fixed.
+- [x] **Automated hardware validation**: full BLE chain (found, connect,
+      GATT discovery, all characteristics, notification subscribe), 5
+      consecutive clean Discovery-publish boot cycles, a 5-minute
+      continuous-operation soak test (0 crashes/reboots/malloc
+      failures/watchdog events), OTA `GET /version` + endpoint routing,
+      and a live MQTT command → state round-trip via the broker -- all
+      passing on real hardware with the fully optimized configuration.
+- [x] **Manual hardware validation, real Grohe Blue Dial** (2026-09-11):
+      with this milestone's fully optimized firmware flashed, the
+      complete water-dispensing path was exercised directly on the
+      device -- Still, Medium, and Sparkling/Carbonated water each
+      dispensed successfully; different pour amounts via the rotary
+      encoder worked correctly; Stop/Cancel mid-dispense worked and BLE
+      stayed connected afterward; BLE connect and HMAC command
+      authentication both functioned throughout. This is a manual
+      physical test, not something any automated boot-log capture in
+      this investigation triggered or could trigger (no debug/test hook
+      exists to simulate encoder input or a dispense command from this
+      environment) -- recorded here because it closes the one gap the
+      automated validation above could not cover on its own.
+- [ ] **Not yet done**: a real `POST /ota` firmware upload exercising
+      `esp_ota_write()`'s actual flash-write path at the reduced 4096 B
+      httpd stack size -- only `GET /version` and unauthenticated-request
+      routing were tested. Lower confidence than every other result in
+      this milestone.
+
 ## v1.0 Release Criteria
 
 What "version 1.0" means for this project -- the minimum bar for the

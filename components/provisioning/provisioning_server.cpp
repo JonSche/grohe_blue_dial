@@ -4,6 +4,7 @@
 
 #include "cJSON.h"
 #include "esp_log.h"
+#include "mem_diag/mem_diag.hpp"
 
 namespace provisioning {
 namespace {
@@ -127,6 +128,13 @@ void ProvisioningServer::StartServer() {
   config.max_uri_handlers = 1;
   config.max_open_sockets = 2;
   config.lru_purge_enable = true;
+
+  // TEMPORARY DIAGNOSTIC (whole-system RAM investigation): heap state
+  // immediately before this instance's own httpd task-creation attempt
+  // -- logged unconditionally, whether or not httpd_start() below then
+  // succeeds (currently: it doesn't -- see this investigation's own
+  // ESP_ERR_HTTPD_TASK findings).
+  mem_diag::Log(kTag, "PROVISIONING_INIT");
 
   const esp_err_t err = httpd_start(&server_, &config);
   if (err != ESP_OK) {

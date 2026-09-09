@@ -8,6 +8,7 @@
 #include "firmware_info/firmware_info.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "mem_diag/mem_diag.hpp"
 
 namespace ota {
 namespace {
@@ -96,10 +97,37 @@ void OtaServer::StartServer() {
   config.max_uri_handlers = 2;
   config.max_open_sockets = 2;
   config.lru_purge_enable = true;
-  // A bit more than the 4096-byte default: esp_ota_write()'s own flash
-  // write path needs some of that headroom on top of this component's
-  // own recv-then-write loop (HandleOtaPost()).
-  config.stack_size = 6144;
+  // M13.3 RAM investigation, Phase 2: was 6144 ("a bit more than
+  // esp_http_server's own 4096-byte HTTPD_DEFAULT_CONFIG() default, for
+  // esp_ota_write()'s own flash write path on top of this component's
+  // recv-then-write loop"). Real hardware measurement (mem_diag's
+  // "httpd" task high-water-mark) shows only ~612-2012 B of that 6144 B
+  // ever touched across several runs (idle vs. after a real GET
+  // request), comfortably under 4096 -- and unlike Phase 1's mqtt_task,
+  // this component's own handler code has no large stack-local state on
+  // either of its two code paths (HandleVersionGet()'s `char body[160]`
+  // is the largest single local; HandleOtaPost()'s own working buffer,
+  // recv_buffer_, is a class member, not a stack allocation -- see
+  // ota_server.hpp). Kept at 4096 after a 4-run A/B series (3x 4096, 1x
+  // 6144): no OTA/httpd-specific fault appeared at either size (no stack-
+  // overflow canary, no "Malloc failed" inside httpd/OTA code,
+  // httpd_start() always succeeded, GET/POST routing confirmed working
+  // via curl). The investigation's own pre-existing, already root-caused
+  // MQTT-Discovery std::bad_alloc crash reproduced at both sizes with
+  // noisy, inconsistent frequency (2/3 vs 8/9, 1/2, 7/8 boot cycles) that
+  // does not track the OTA stack size specifically -- unlike Phase 1's
+  // clean, reproducible signal, this is not strong enough evidence to
+  // treat 4096 as unsafe. Caveat: the real POST /ota flash-write path
+  // (esp_ota_write() etc.) was not itself exercised in this A/B series,
+  // only GET /version and routing-level requests -- lower confidence
+  // than Phase 1's result for that specific code path.
+  config.stack_size = 4096;
+
+  // TEMPORARY DIAGNOSTIC (whole-system RAM investigation): heap state
+  // immediately before this instance's own httpd task-creation attempt
+  // -- logged unconditionally, whether or not httpd_start() below then
+  // succeeds.
+  mem_diag::Log(kTag, "OTA_INIT");
 
   const esp_err_t err = httpd_start(&server_, &config);
   if (err != ESP_OK) {

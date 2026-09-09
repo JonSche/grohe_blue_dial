@@ -7,6 +7,7 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
+#include "mem_diag/mem_diag.hpp"
 #include "nvs_flash.h"
 
 // See the header's own top comment for the overall design. The connect-
@@ -703,6 +704,10 @@ void WifiConnection::HandleWifiOrIpEvent(esp_event_base_t base, int32_t id,
              IP2STR(&got_ip_data->ip_info.ip),
              IP2STR(&got_ip_data->ip_info.gw),
              IP2STR(&got_ip_data->ip_info.netmask));
+    // TEMPORARY DIAGNOSTIC (whole-system RAM investigation): the one
+    // true "Wi-Fi ready" moment -- every WifiConnection consumer's
+    // on_ready ultimately traces back to this event.
+    mem_diag::Log(kTag, "WIFI_READY");
 
     // [driver]: DNS is not part of ip_event_got_ip_t itself -- it's a
     // separate esp_netif query, unlike ip/gw/netmask above.

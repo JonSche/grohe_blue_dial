@@ -12,6 +12,7 @@
 #include "host/ble_hs_adv.h"
 #include "host/ble_uuid.h"
 #include "host/util/util.h"
+#include "mem_diag/mem_diag.hpp"
 #include "nimble/hci_common.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -340,6 +341,11 @@ esp_err_t BleManager::Init() {
   nimble_port_freertos_init(&BleManager::HostTask);
 
   ESP_LOGI(kTag, "NimBLE host starting");
+  // TEMPORARY DIAGNOSTIC (whole-system RAM investigation): NimBLE's own
+  // static/init-time footprint (controller + host + msys/ACL/HCI-event
+  // buffer pools, all MALLOC_CAP_INTERNAL per CONFIG_BT_NIMBLE_MEM_
+  // ALLOC_MODE_INTERNAL) is fully committed by this point.
+  mem_diag::Log(kTag, "BLE_INITIALIZED");
   return ESP_OK;
 }
 
@@ -684,6 +690,8 @@ void BleManager::HandleConnect(const struct ble_gap_event& event) {
   subscribe_started_ = false;
   SetState(BleState::kConnected);
   ESP_LOGI(kTag, "Connected; conn_handle=%d", conn_handle_);
+  // TEMPORARY DIAGNOSTIC (whole-system RAM investigation).
+  mem_diag::Log(kTag, "BLE_CONNECTED");
 
   const int rc =
       ble_gattc_exchange_mtu(conn_handle_, &BleManager::OnMtuResult, this);
@@ -802,6 +810,8 @@ void BleManager::DiscoverNextServiceChrs() {
   if (next_svc_to_disc_ >= num_services_) {
     SetState(BleState::kReadyForProtocol);
     ESP_LOGI(kTag, "GATT discovery complete; ready for protocol");
+    // TEMPORARY DIAGNOSTIC (whole-system RAM investigation).
+    mem_diag::Log(kTag, "BLE_GATT_DISCOVERY_COMPLETE");
     // M11.1: this is this class's own definition of "a successful
     // connection" -- every earlier point (GAP connect, MTU exchange,
     // service discovery) could still be followed by a discovery-level
@@ -1031,6 +1041,8 @@ void BleManager::HandleSubscribeWrite(const struct ble_gatt_error& error) {
     return;
   }
   ESP_LOGI(kTag, "Subscribed to notifications successfully");
+  // TEMPORARY DIAGNOSTIC (whole-system RAM investigation).
+  mem_diag::Log(kTag, "BLE_SUBSCRIBED");
   // M7: the only way the app task can learn notifications are enabled --
   // see BleEventType::kSubscribed's own comment for why this can't just be
   // inferred from kReadyForProtocol.

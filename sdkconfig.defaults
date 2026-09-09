@@ -40,6 +40,128 @@ CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 CONFIG_BT_NIMBLE_MAX_BONDS=1
 
+# M13.3 RAM investigation, Phase 3, BLE candidate "Role" (found during
+# investigation, not one of the five named candidates, but matches
+# exactly what the roadmap asked for: "kein BLE peripheral role"). This
+# dial only ever scans and connects as a GATT *client* -- verified via a
+# full grep of components/grohe_ble/ and components/app/ for
+# ble_gap_adv_start/ble_gatts_*/any peripheral-advertising API: zero
+# matches. NimBLE's own source (nimble/host/src/ble_gap.c) confirms every
+# GATT-client operation this firmware uses (connect, discover services/
+# chars/descriptors, read, write -- see esp_nimble_cfg.h's own
+# MYNEWT_VAL_BLE_GATT_* defines) is gated purely on BLE_ROLE_CENTRAL, and
+# the scan call this firmware uses (ble_gap_disc) is gated on
+# `BLE_ROLE_CENTRAL || BLE_ROLE_OBSERVER` -- CENTRAL alone (kept below)
+# satisfies that. PERIPHERAL/BROADCASTER/OBSERVER default to y in
+# ESP-IDF's own Kconfig; disabling all three here.
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+
+# M13.3 RAM investigation, Phase 3, BLE candidate A: this dial scans for
+# exactly one known service UUID and stops on the first match (see
+# StartScan()/OnDeviceFound() in ble_manager.cpp) -- it never needs to
+# hold more than a handful of unprocessed advertising reports at once.
+# BT_CTRL_BLE_ADV_REPORT_FLOW_CTRL_NUM's own Kconfig help states the
+# host-side cache this bounds costs "35 * N bytes" -- default 100 (up to
+# ~3500 B), lowered here to the Kconfig-enforced floor of 50 (up to
+# ~1750 B). This is a *ceiling*, not a guaranteed saving -- the cache is
+# populated per-report while scanning, not a fixed pool reserved at
+# BleManager::Init() time, so it may not show up at all in the
+# BLE_PRE_INIT/BLE_INITIALIZED checkpoints (measured before scanning
+# produces any reports).
+CONFIG_BT_CTRL_BLE_ADV_REPORT_FLOW_CTRL_NUM=50
+
+# M13.3 RAM investigation, Phase 3, BLE candidate B: two duplicate-
+# advertisement filter caches. BT_CTRL_SCAN_DUPL_CACHE_SIZE (depends on
+# BT_CTRL_BLE_SCAN_DUPL=y, active here) tracks up to N distinct nearby
+# device addresses so the controller doesn't re-report the same
+# advertiser to the host on every beacon interval -- default 100 is
+# sized for a busy BLE environment; this dial only cares about finding
+# one specific device and stops scanning on the first match
+# (ble_gap_disc_cancel() in ble_manager.cpp's OnDeviceFound()), so a
+# typical home's worth of nearby devices (phones, watches, beacons,
+# smart-home peripherals) is a generous target. Lowered to 20.
+# BT_CTRL_ADV_DUP_FILT_MAX is specifically the BLE 5.0 *extended*
+# advertising duplicate filter -- CONFIG_BT_NIMBLE_EXT_ADV is not set in
+# this project (confirmed in sdkconfig), so this table is provisioned
+# but not exercised by anything this firmware does; lowered to the
+# Kconfig-enforced floor of 1.
+CONFIG_BT_CTRL_SCAN_DUPL_CACHE_SIZE=20
+CONFIG_BT_CTRL_ADV_DUP_FILT_MAX=1
+
+# M13.3 RAM investigation, Phase 3, BLE candidate C: BT_CTRL_BLE_MAX_ACT
+# is the controller's pool of concurrent "activity" instances (shared by
+# connections, scans, periodic-adv sync, and advertising instances) --
+# its own Kconfig help states each instance costs a fixed 828 B, default
+# 6 (~4968 B). This firmware needs at most 2 concurrent: one scan
+# activity and one connection (CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1) --
+# never periodic-adv sync (not used) or any adv instance (BLE candidate
+# "Role" above disables all advertising roles). Scan is explicitly
+# cancelled (ble_gap_disc_cancel()) before connecting
+# (OnDeviceFound()/StartConnect() in ble_manager.cpp), but kept 2 rather
+# than the theoretical minimum of 1 for headroom across that
+# cancel-then-connect handover, in case the controller doesn't free the
+# scan activity synchronously with the HCI command that cancels it.
+CONFIG_BT_CTRL_BLE_MAX_ACT=2
+
+# M13.3 RAM investigation, Phase 3, BLE candidate D: NimBLE host-side
+# transport/mbuf pools, sized for a busy multi-connection/multi-role
+# stack by default. This firmware has exactly one connection, one GATT
+# client, no peripheral/advertiser role, and a small request/response
+# protocol (see components/grohe_ble/grohe_protocol.cpp) -- no large
+# writes, no notification bursts beyond one characteristic. Only pool
+# *counts* touched here, not per-buffer *sizes* (ACL_SIZE/EVT_SIZE stay
+# at their defaults -- those bound single-packet/single-event payload
+# size, not headroom, and touching them risks truncating a legitimate
+# GATT PDU rather than just tightening a queue depth):
+#   MSYS_1 (prepare-write/prepare-response mbufs, unused by this
+#     project's own short reads/writes): 12 -> 6.
+#   MSYS_2 (general host<->controller dynamic mbuf pool, 320 B/block):
+#     24 -> 8.
+#   TRANSPORT_ACL_FROM_LL_COUNT (HCI ACL data buffers -- the actual GATT
+#     read/write/notify payload path): 24 -> 6, still several buffers of
+#     pipeline depth for a single low-throughput connection.
+#   TRANSPORT_EVT_COUNT (high-priority HCI event buffers -- connection
+#     complete/disconnect/etc., not advertising reports): 30 -> 10.
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=6
+CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=8
+CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=6
+CONFIG_BT_NIMBLE_TRANSPORT_EVT_COUNT=10
+
+# M13.3 RAM investigation, Phase 3, BLE candidate E:
+# BT_NIMBLE_MAX_CCCDS is "maximum number of CCC descriptors to save
+# *across reboots*" -- i.e. bonded-peer notification-subscription state
+# persisted in NVS, which requires both BT_NIMBLE_NVS_PERSIST (off by
+# default here) and bonding/pairing itself (BT_NIMBLE_SECURITY_ENABLE,
+# already disabled above by the earlier BLE-security candidate) to ever
+# be exercised at all -- so this candidate's expected impact is smaller
+# than A-D, possibly zero. Lowered from 8 to 1 anyway to match this
+# firmware's actual usage: it subscribes to exactly one notification
+# characteristic (see BleManager's subscribe call in ble_manager.cpp).
+CONFIG_BT_NIMBLE_MAX_CCCDS=1
+
+# M13.3 RAM investigation, BLE optimization candidate #1: BLE-level
+# pairing/security/bonding (Security Manager legacy + Secure Connections
+# pairing, LE link-layer encryption) is Kconfig-enabled by default but
+# verified unused by this project's own code -- ble_manager.cpp never
+# calls ble_gap_security_initiate(), any ble_sm_* API, or any whitelist
+# API (params.filter_policy is always 0). Grohe's own command
+# authentication is entirely application-layer HMAC (see
+# components/grohe_ble/grohe_auth.cpp), independent of BLE's own pairing
+# -- this dial never pairs/bonds with the Grohe Blue at the BLE layer at
+# all. Disabling the parent BT_NIMBLE_SECURITY_ENABLE is sufficient on
+# its own (SM_LEGACY/SM_SC/LL_CFG_FEAT_LE_ENCRYPTION all `depends on` it
+# in components/bt/host/nimble/Kconfig.in, and esp_nimble_cfg.h's own
+# #ifndef fallbacks cleanly default every one of them to 0 once absent);
+# all four are still listed explicitly here for auditability, matching
+# exactly what was measured before/after this change.
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
+CONFIG_BT_NIMBLE_SM_LEGACY=n
+CONFIG_BT_NIMBLE_SM_SC=n
+CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_ENCRYPTION=n
+
 # OTA (M12): a freshly-flashed OTA image boots in ESP_OTA_IMG_PENDING_
 # VERIFY state; if it crashes, watchdogs, or loses power before
 # ota::ConfirmBootValid() confirms it (called from App::Run(), only after

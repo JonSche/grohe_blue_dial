@@ -5,6 +5,7 @@
 #include "firmware_info/firmware_info.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "mem_diag/mem_diag.hpp"
 #include "ota/ota_rollback.hpp"
 
 namespace app {
@@ -30,6 +31,10 @@ constexpr uint32_t kDisplaySleepTimeoutMs = 60000;
 }  // namespace
 
 void App::Run() {
+  // TEMPORARY DIAGNOSTIC (whole-system RAM investigation) -- the earliest
+  // possible checkpoint, before this function does anything else.
+  mem_diag::Log(kTag, "BOOT");
+
   // M12.3: every build should be identifiable from its own boot log alone
   // -- see components/firmware_info/ for where each value actually comes
   // from (ESP-IDF's own esp_app_desc_t for Version()/BuildDate()/
@@ -54,6 +59,14 @@ void App::Run() {
   // SntpTimeProvider) is the first thing to actually acquire a connection
   // through it -- see wifi_connection.hpp's own comment.
   ESP_ERROR_CHECK(wifi_connection_.Init());
+
+  // TEMPORARY DIAGNOSTIC (whole-system RAM investigation): isolates
+  // wifi_connection_.Init()'s own cost (esp_netif_init(), the default
+  // event loop, esp_wifi_init()'s static RX/TX buffer pools -- all
+  // committed here, before any actual Wi-Fi connection attempt) from
+  // everything that runs after it (display/LVGL, BLE/NimBLE) -- see the
+  // existing BOOT/BLE_INITIALIZED checkpoints this sits between.
+  mem_diag::Log(kTag, "WIFI_INITIALIZED");
 
   // M12: non-blocking -- registers a permanent Wi-Fi acquisition and
   // starts the OTA HTTP server once it comes up (or logs and does
@@ -92,6 +105,20 @@ void App::Run() {
   // request can arrive before Wi-Fi itself finishes associating anyway.
   provisioning_server_.Init();
 
+  // TEMPORARY DIAGNOSTIC (whole-system RAM investigation): the cleanest
+  // available boundary immediately before BLE/NimBLE init -- everything
+  // above (display/LVGL, encoder, credentials, provisioning
+  // registration) is already committed by this point, and nothing below
+  // runs before grohe_client_.Init() itself. Note this call also runs
+  // SntpTimeProvider::Init() first (a small WifiConnection::AcquireAsync()
+  // registration, not a BLE cost) before BleManager::Init() -- see
+  // GroheClient::Init()'s own body -- so the BLE_PRE_INIT ->
+  // BLE_INITIALIZED delta is "BLE plus that one small registration", not
+  // 100% exclusively BLE; not split further here since doing so would
+  // require a change inside components/grohe_ble/ itself, out of scope
+  // for this diagnostic pass.
+  mem_diag::Log(kTag, "BLE_PRE_INIT");
+
   // BLE is not allowed to take the rest of the firmware down with it: the
   // dial still has to work (display, encoder, UI) even if the radio never
   // comes up, so this is a log, not an ESP_ERROR_CHECK.
@@ -119,7 +146,24 @@ void App::Run() {
   int64_t last_activity_us = esp_timer_get_time();
   bool backlight_on = true;
 
+  // TEMPORARY DIAGNOSTIC (whole-system RAM investigation): a one-shot
+  // task-stack survey, deliberately delayed past boot (see
+  // kTaskStackSurveyDelayUs below) so Wi-Fi/BLE/MQTT/OTA have all had a
+  // real chance to create their own tasks first -- a survey run at t=0
+  // would only ever find "main". Not gated on any of those actually
+  // having succeeded; mem_diag::LogTaskStacks() itself reports each
+  // candidate task as found or not found, never guesses.
+  constexpr int64_t kTaskStackSurveyDelayUs = 15'000'000;  // 15s
+  bool logged_task_stacks = false;
+  const int64_t boot_time_us = esp_timer_get_time();
+
   for (;;) {
+    if (!logged_task_stacks &&
+        esp_timer_get_time() - boot_time_us >= kTaskStackSurveyDelayUs) {
+      logged_task_stacks = true;
+      mem_diag::LogTaskStacks(kTag);
+    }
+
     bool state_changed = false;
     bool encoder_activity = false;
     encoder_input_.Poll([this, &state_changed,
