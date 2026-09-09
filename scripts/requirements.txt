@@ -1,0 +1,44 @@
+# Dependencies for scripts/grohe_cloud_bootstrap.py and
+# scripts/grohe_cloud_refresh.py (provision.sh --from-cloud) only -- nothing
+# else in this repo is Python. Install once:
+#
+#   python3 -m pip install -r scripts/requirements.txt
+#
+# (a venv is a reasonable idea but not required by these scripts, same as
+# this project doesn't mandate one for anything else)
+#
+# `grohe` (https://github.com/koproductions-code/grohe, MIT) is the actual
+# Grohe Cloud client -- login/refresh/dashboard logic is entirely theirs,
+# reused as-is, not reimplemented here (see grohe_cloud_refresh.py's own
+# docstring). Pinned here as a floor, not exact, since it's a small,
+# actively maintained package and we only use its stable, documented
+# GroheTokens/GroheError surface.
+grohe>=0.3.1
+
+# `grohe`'s own PyPI metadata (pyproject.toml's [project.dependencies]) only
+# declares bs4/httpx -- verified against the published 0.3.1 wheel's own
+# requires_dist. Its source, however, does `import jwt` (client.py) and
+# `from dataclasses_json import ...` (dto/grohe_dto.py) unconditionally. A
+# plain `pip install grohe` therefore does NOT pull those two in, and
+# import grohe.tokens fails without them. Listed explicitly here so this
+# actually works, not because grohe_blue_dial has an opinion on Grohe's own
+# packaging.
+PyJWT>=2.10
+dataclasses-json>=0.6
+
+# grohe's own declared dependencies, pinned loosely for the same reason as
+# `grohe` itself above -- pip will already pull these in transitively, but
+# listing them keeps `pip install -r requirements.txt` reproducible even if
+# that metadata gap above ever gets fixed upstream.
+httpx>=0.27
+beautifulsoup4>=4.12
+
+# Verified by actually installing into a throwaway venv (not assumed): a
+# bare `import grohe` fails without this too -- grohe/__init__.py
+# unconditionally imports GroheDevice (dto/grohe_device.py), which does
+# `from benedict import benedict`. Not declared as a dependency anywhere in
+# grohe's own packaging (pyproject.toml or its GitHub requirements.txt)
+# either. We never use GroheDevice ourselves (only GroheTokens/GroheError),
+# but Python still runs grohe/__init__.py before grohe.tokens is reachable,
+# so this is required regardless.
+python-benedict>=0.33

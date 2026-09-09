@@ -741,6 +741,181 @@ literally is -- so treat the provisioning token, and the local network
 it's used on, accordingly. Appropriate for a trusted local Wi-Fi
 network only; see `SECURITY.md`.
 
+**Developer workflow**: `scripts/provision.sh <device-ip>` -- reads
+`USER_ID`/`PRESHARED_KEY` from one of two sources, then `POST`s both to
+`/provision` with `curl`, authenticated with the shared secret from the
+same `provisioning_secret_local.hpp` the firmware itself reads (override
+with `GROHE_DIAL_PROVISION_TOKEN`). Mirrors `scripts/ota.sh`'s own shape
+(host via argument/`--host`/`GROHE_DIAL_HOST`, secret read from a
+gitignored local header) but never prints `USER_ID`, `PRESHARED_KEY`, the
+provisioning token, or (in `--from-cloud` mode) the Grohe Cloud
+refresh/access token.
+
+*Default source*: a local `grohe_blue_ble` checkout's own `.env`
+(`../grohe_blue_ble/.env` by default, override with `GROHE_BLUE_BLE_ENV`)
+-- just forwards what's already there, unchanged, no Grohe Cloud call.
+
+*`--from-cloud` source*: fetches fresh credentials directly from the Grohe
+Cloud via `scripts/grohe_cloud_refresh.py`, removing the `grohe_blue_ble`
+checkout dependency entirely. This reuses
+[`koproductions-code/grohe`](https://github.com/koproductions-code/grohe)
+(MIT, `pip install grohe` -- see `scripts/requirements.txt`) for every
+actual Grohe Cloud call; nothing in this project reimplements OIDC login
+or token refresh. That package's own `client.py` is, with near certainty,
+the literal source `grohe_blue_ble/docs/EVIDENCE.md` cites as `grohe/
+client.py` for the `sub`-claim-as-`user_id` finding -- the code is
+identical. Two lower-level pieces of that package are used directly rather
+than through its main `GroheClient` (which mandates an email+password at
+construction and has no public way to resume from an existing
+refresh_token):
+
+- `grohe.tokens.GroheTokens.get_tokens_from_credentials(email, password)`
+  -- the interactive login itself (POSTs the Grohe account credentials to
+  the real Keycloak login form at `idp2-apigw.cloud.grohe.com`, follows
+  the app's own `ondus://.../oidc/token` redirect to fetch the initial
+  tokens). Used **once**, interactively, by `scripts/grohe_cloud_bootstrap.py`
+  (`python3 scripts/grohe_cloud_bootstrap.py`) -- prompts for email and a
+  hidden (`getpass`) password, and persists only the resulting
+  `refresh_token` to a gitignored file
+  (`scripts/.grohe_cloud_refresh_token`, `chmod 600`, overridable with
+  `GROHE_CLOUD_REFRESH_TOKEN_FILE` or bypassed entirely with
+  `GROHE_CLOUD_REFRESH_TOKEN`). The password itself touches memory only
+  for that one call and is never written anywhere.
+- `grohe.tokens.GroheTokens.get_refresh_tokens(refresh_token)` -- `POST
+  https://idp2-apigw.cloud.grohe.com/v3/iot/oidc/refresh`, JSON body
+  `{"refresh_token": ..., "grant_type": "refresh_token"}`. Used on every
+  `--from-cloud` run by `scripts/grohe_cloud_refresh.py` to turn the
+  stored refresh_token into a fresh access_token, live-verified against
+  the real endpoint during development (a deliberately invalid token
+  correctly came back `GroheUnauthorizedError` from the real server, not a
+  guess). If the cloud rotates the refresh_token in its response (normal
+  OAuth behaviour), the local file is updated automatically. This is also
+  the endpoint `github.com/gkreitz/homeassistant-grohe_sense` (a separate,
+  independent reverse-engineering effort) uses -- corroborating it,
+  distinct from `/v3/iot/oidc/token`, the endpoint the *official app*
+  itself is configured with per its own decompiled `strings.xml`
+  (`GroheWatersystems/resources/res/values/strings.xml`'s `tokenEndpoint`)
+  via Google's AppAuth library. Both were checked; `/oidc/refresh` is the
+  one this project's own scripts use, since it's what the reused library
+  actually calls and what live-tested correctly.
+
+`user_id` is decoded from the fresh access token's JWT `sub` claim with
+the same call `GroheClient` itself uses internally
+(`jwt.decode(access_token, options={'verify_signature': False})['sub']`,
+`PyJWT` -- already a runtime need of `grohe`, see `scripts/requirements.txt`'s
+own note on that package's incomplete declared dependencies, verified by
+actually installing it into a clean venv rather than trusting its
+`pyproject.toml`). The dashboard fetch (`GET /v3/iot/dashboard` with
+`Authorization: Bearer <access_token>`) is the one call
+`grohe_cloud_refresh.py` replicates directly instead of going through
+`GroheClient.get_dashboard()` -- the alternative would mean reaching into
+`GroheClient`'s own name-mangled private attributes from outside, which is
+worse practice, not better reuse; this is a single already-documented,
+already-authenticated GET, not auth/token logic. The real dashboard JSON
+is `{"locations": [{"rooms": [{"appliances": [...]}]}]}`, not the flat
+`{"appliance": {"presharedkey": ...}}` `grohe_blue_ble/docs/EVIDENCE.md`
+shows as a simplified example -- confirmed two independent ways: reading
+`grohe`'s own `dto/grohe_device.py` (`GroheDevice.get_devices()` walks
+this exact tree) and reading the official Android app's decompiled DTOs
+(`GroheWatersystems/sources/com/grohe/smarthome/core/network/dashboard/
+model/*.java`). `grohe_cloud_refresh.py` walks that tree for the one
+appliance carrying a `presharedkey` field, and refuses to guess (a clear
+error, not a silent pick) if none or more than one is found.
+
+## MQTT / Home Assistant Discovery (M13.3)
+
+Full design in [`docs/mqtt_ha_discovery_plan.md`](mqtt_ha_discovery_plan.md)
+(topic schema, discovery entity list, payload examples, every open
+decision this milestone resolved). This section is the short version.
+
+**Scope**: the dial's own settings (read/write) and BLE connection status
+(read-only) only -- `mqtt::MqttClient` (`components/dial_mqtt/`). No
+dispense/stop control, no live dispense state -- both explicitly deferred
+to M13.5 (see `docs/ROADMAP.md`'s M13 section). No `grohe_ble`, no
+`app::DialController`, no `grohe_smarthome`/Grohe Cloud dependency of any
+kind -- `MqttClient` only ever reads `dial_state::DialState` by value
+(mirroring `ui::UiManager::Render()`'s own read-only relationship to it)
+and reads/writes `settings::DialSettingsStore` directly (mirroring
+`provisioning::ProvisioningServer`'s own relationship to
+`grohe_ble::NvsCredentialsProvider`).
+
+**Transport**: a third permanent `time_service::WifiConnection` consumer,
+alongside `ota::OtaServer` and `provisioning::ProvisioningServer` -- same
+non-blocking `AcquireAsync()`/never-`Release()`d shape. Plain `mqtt://`,
+never `mqtts://`: `esp-mqtt`'s TLS transport goes through the identical
+esp-tls/mbedTLS stack that failed on this exact chip during M12.4's
+reverted HTTPS OTA attempt (`MBEDTLS_ERR_SSL_ALLOC_FAILED`, heap
+fragmentation, no PSRAM -- see "OTA (M12)" above). `CONFIG_MQTT_TRANSPORT_
+SSL=n` in `sdkconfig.defaults` removes that code path from the build
+entirely, not just leaves it unused.
+
+**Broker config**: `mqtt::MqttConfigProvider` (broker URI, username,
+password), gitignored `mqtt_config_local.hpp` -- same local-header
+pattern as every other secret in this project. Empty broker URI means
+"MQTT disabled", never "connect unauthenticated" -- same convention as
+OTA's/Provisioning's own secrets.
+
+**Topic schema** (`components/dial_mqtt/ha_discovery.{hpp,cpp}`): everything
+under `grohe_dial/<mac>/`, where `<mac>` is the lowercase-hex STA MAC (no
+active Wi-Fi connection required to read it -- `esp_read_mac()` reads
+straight from eFuse), also used as the MQTT `client_id` and Home
+Assistant's discovery `node_id`. `settings/<name>/state` (retained) +
+`settings/<name>/set` (subscribed) for the three writable settings;
+`state/connection_status` (retained, read-only) for BLE connection
+status; `availability` for Last Will/Availability (see below). Home
+Assistant MQTT Discovery configs live under `homeassistant/<component>/
+grohe_dial_<mac>/<object_id>/config` (HA's own default discovery prefix,
+hardcoded).
+
+**Entities**: `number.default_amount_ml`, `number.amount_step_ml`,
+`select.default_water_type` (all read/write, `entity_category: config`),
+`sensor.connection_status` (read-only, `entity_category: diagnostic`).
+`default_amount_ml`'s discovery `step` field tracks the *live*
+`amount_step_ml` setting -- `MqttClient` republishes that one discovery
+config whenever `amount_step_ml` itself changes via its own command
+topic, keeping Home Assistant's own control in sync; `amount_step_ml`'s
+own entity uses a fixed, independent 10 ml UI step (coupling it to
+itself would be circular). No dedicated firmware-version entity --
+`firmware_info::Version()`/`GitCommit()` are embedded as every entity's
+shared `device.sw_version` field instead, refreshed on every (re)connect.
+
+**Availability / Last Will**: `grohe_dial/<mac>/availability`, retained,
+referenced as every entity's `availability_topic`. Registered as the MQTT
+session's Last Will (`msg="offline"`, `retain=1`) at client configuration
+time; `MqttClient` explicitly publishes `"online"` on every
+`MQTT_EVENT_CONNECTED` (first connect and every reconnect alike). This
+firmware has no graceful-shutdown path (`App::Run()` never returns), so
+`"offline"` is only ever published by the broker itself, on an
+ungraceful drop -- the normal, expected use of LWT. A clean MQTT session
+(the default) is used deliberately, paired with unconditionally
+republishing every discovery config and settings state topic on every
+connect -- the only reconnect-state logic this component needs.
+
+**Reconnect**: `esp-mqtt`'s own built-in auto-reconnect (~10 s backoff,
+`network.disable_auto_reconnect` left `false`) -- no custom reconnect
+loop, matching this project's "reuse the library's own mechanism"
+instinct elsewhere (`esp_ota_*` used directly, no custom OTA protocol).
+Keepalive is 30 s (not `esp-mqtt`'s own 120 s default), so a real drop is
+reflected in Home Assistant within roughly one keepalive window, not up
+to ~3 minutes. **The physical dial itself never reacts to MQTT's own
+connection state in any way, in either direction** -- no UI element, no
+behavior change -- matching this project's own "Home Assistant extends
+the product; it never becomes a runtime dependency of it" principle
+literally: a broker outage must be invisible to someone standing at the
+dial.
+
+**Security**: broker username/password (`esp_mqtt_client_config_t`'s own
+`credentials.username`/`credentials.authentication.password`) instead of
+an app-level shared-secret header -- MQTT has no such concept; this is
+the equivalent, authenticated at the layer MQTT actually authenticates
+at. Same threat model as OTA/Provisioning: protects against accidental/
+opportunistic access on an assumed-trusted local LAN, not against an
+attacker who can already sniff that LAN's traffic. Blast radius is
+deliberately small by construction: the only thing a command topic can
+ever reach is `DialSettingsStore::Set()` -- a compromised/misconfigured
+broker can change this dial's default pour amount, never dispense water,
+never touch BLE credentials or HMAC keys. See `SECURITY.md`.
+
 ## Dispense UI (M11)
 
 Implements `docs/ui/dispense_animation_mockups.md` (the frozen UI spec)

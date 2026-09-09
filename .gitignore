@@ -6,6 +6,8 @@ dependencies.lock
 .vscode/
 .DS_Store
 logs/
+__pycache__/
+*.pyc
 
 # Real Grohe Blue credentials (USER_ID / pre-shared key) -- never committed.
 # See components/grohe_ble/include/grohe_ble/credentials_local.hpp.example.
@@ -26,3 +28,10 @@ components/ota/include/ota/ota_secret_local.hpp
 # committed. See
 # components/provisioning/include/provisioning/provisioning_secret_local.hpp.example.
 components/provisioning/include/provisioning/provisioning_secret_local.hpp
+
+# Grohe Cloud refresh token (scripts/provision.sh --from-cloud) -- never
+# committed. Written by scripts/grohe_cloud_bootstrap.py (the one-time,
+# interactive login), read by scripts/grohe_cloud_refresh.py on every
+# subsequent run. The account password itself is never written to disk at
+# all, by either script.
+scripts/.grohe_cloud_refresh_token
