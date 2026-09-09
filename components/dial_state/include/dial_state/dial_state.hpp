@@ -21,11 +21,23 @@ enum class WaterType {
 // "PRESS TO STOP" for that window (see docs/ui/dispense_animation_mockups.md,
 // "Stop and Finished"). kFinished: the predicted duration has elapsed and
 // the checkmark hold is in progress before returning to kIdle.
+//
+// kFailed (M13.6): a dispense *request* was sent and the appliance
+// rejected it (e.g. wrong BLE credentials -- see
+// docs/ui/error_feedback_concepts.md, the design study this implements)
+// -- entered directly from kIdle, never from kDispensing, since a
+// rejected request never actually started a pour. Mirrors kFinished's
+// own shape exactly: a short, fixed hold (app::DialController's
+// kFailedHoldUs) before automatically returning to kIdle, no button
+// press required. A rejected *stop* is a different, pre-existing case
+// (reverts to kDispensing, not kFailed -- see
+// DialController::HandleCommandOutcome()) and is unaffected by this.
 enum class DispenseStatus {
   kIdle,
   kDispensing,
   kStopping,
   kFinished,
+  kFailed,
 };
 
 // BLE connection readiness, independent of whether a valid time is

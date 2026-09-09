@@ -196,6 +196,13 @@ class DialController {
   // already stopped by the time this one starts.
   int64_t finished_until_us_ = 0;
 
+  // M13.6: same shape as finished_until_us_ above, for
+  // dial_state::DispenseStatus::kFailed -- set by HandleCommandOutcome()
+  // when a dispense request is rejected, read by Tick() to auto-return to
+  // kIdle. dispense_session_ was never started for a rejected request, so
+  // there is no physical timer to stop here, unlike kFinished.
+  int64_t failed_until_us_ = 0;
+
   // M11.1: esp_timer_get_time() deadline for how long connection_status
   // stays kConnectionLost before Tick() flips it to kConnecting -- purely
   // cosmetic, same shape as finished_until_us_ above. (Re)set by every

@@ -7,8 +7,9 @@ namespace ui {
 
 // Builds and owns the LVGL screen tree for the Grohe Dial's main screen: a
 // circular progress ring showing the pour amount, the amount itself (or,
-// while Finished, a checkmark), the selected water type, a hint, two tiny
-// connectivity glyphs, and a small travelling highlight during Dispensing.
+// while Finished/Failed, a status glyph), the selected water type, a
+// hint, two tiny connectivity glyphs, and a small travelling highlight
+// during Dispensing.
 // Every widget is created once in Init(); Render() only ever updates their
 // content/value from the given DialState and starts/stops the small set of
 // LVGL animations this screen uses (see Render()'s own comment on why that
@@ -59,11 +60,19 @@ class UiManager {
   // -- both driven by lv_anim_t, not a custom timer.
   lv_obj_t* highlight_arc_ = nullptr;
 
-  // "500 ml" as one composed row; hidden and replaced by checkmark_label_
-  // while Finished.
+  // "500 ml" as one composed row; hidden and replaced by
+  // status_glyph_label_ while Finished or Failed.
   lv_obj_t* amount_row_ = nullptr;
   lv_obj_t* amount_label_ = nullptr;
-  lv_obj_t* checkmark_label_ = nullptr;
+  // M13.6: renamed from checkmark_label_ -- this one slot now shows
+  // either the Finished checkmark (LV_SYMBOL_OK, unchanged from before)
+  // or, transiently, a failed-dispense glyph (LV_SYMBOL_CLOSE) -- same
+  // widget, same position, same hidden/shown toggle against amount_row_
+  // either way; only which symbol is set changes with which state is
+  // active (see Render()). Its text colour is set once, in Init(), and
+  // never changes with state -- the ring's own colour and the hint text
+  // are what distinguish Finished from Failed, not this label.
+  lv_obj_t* status_glyph_label_ = nullptr;
 
   // Water type -- opacity steps down while Dispensing/Stopping, restored
   // otherwise. Never animated; a one-time style change at the state

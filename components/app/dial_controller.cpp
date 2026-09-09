@@ -26,6 +26,14 @@ constexpr char kTag[] = "dial_controller";
 // Ready (frozen UI spec, "Stop and Finished": "~400 ms").
 constexpr int64_t kFinishedHoldUs = 400'000;
 
+// M13.6: how long the failed-dispense glyph (dial_state::DispenseStatus::
+// kFailed) stays on screen before Tick() returns to Idle -- see
+// docs/ui/error_feedback_concepts.md's recommendation. Deliberately
+// longer than kFinishedHoldUs: a checkmark only needs to be *recognized*,
+// which a 400 ms flash already achieves, but a failure needs to be
+// *read* ("Try again"), which needs enough time to actually register.
+constexpr int64_t kFailedHoldUs = 1'500'000;
+
 // M11.1: how long the dial shows "Connection lost" before switching to
 // "Connecting..." for the remainder of BleManager's own (much longer,
 // backing-off) retry loop -- "a short visible indication (~1 second)" per
@@ -102,7 +110,9 @@ DialAction DialController::HandleEvent(encoder::EncoderEvent event) {
           return DialAction::kRequestStop;
         case dial_state::DispenseStatus::kStopping:
         case dial_state::DispenseStatus::kFinished:
-          break;  // Already committed to stopping, or about to auto-return.
+        case dial_state::DispenseStatus::kFailed:
+          break;  // Already committed to stopping, or about to auto-return
+                  // (Finished/Failed both revert on their own -- see Tick()).
       }
       break;
     case EncoderEvent::kLongPress:
@@ -163,8 +173,23 @@ bool DialController::HandleCommandOutcome(
       state_.dispense_status = dial_state::DispenseStatus::kDispensing;
       return true;
     }
-    // A rejected dispense request leaves dispense_status exactly as it
-    // was (still Idle) -- nothing to revert.
+    // M13.6: a rejected *dispense* request -- state_.dispense_status is
+    // guaranteed still kIdle here (the only thing that ever moves it off
+    // kIdle is a *successful* dispense outcome, below), never actually
+    // started a pour, so there is nothing for dispense_session_ to stop.
+    // Mirrors Tick()'s own kFinished handling: a short, fixed hold
+    // (kFailedHoldUs) shown via dial_state::DispenseStatus::kFailed, then
+    // Tick() returns to kIdle on its own -- see that enumerator's own
+    // comment on dial_state.hpp. Does not affect connection_status: the
+    // BLE link itself is fine, only this one command was rejected -- see
+    // docs/ui/error_feedback_concepts.md's "BLE indicator" section for
+    // why the two are kept deliberately separate.
+    if (outcome.was_dispense &&
+        state_.dispense_status == dial_state::DispenseStatus::kIdle) {
+      state_.dispense_status = dial_state::DispenseStatus::kFailed;
+      failed_until_us_ = esp_timer_get_time() + kFailedHoldUs;
+      return true;
+    }
     return false;
   }
 
@@ -255,6 +280,18 @@ bool DialController::Tick() {
     }
     state_.dispense_status = dial_state::DispenseStatus::kIdle;
     state_.delivered_ml = 0;
+    return true;
+  }
+
+  // M13.6: same shape as the kFinished branch above -- hold, then return
+  // to kIdle on its own. delivered_ml needs no reset here (unlike
+  // kFinished's own branch): a rejected dispense request never started
+  // counting up, so it's already 0.
+  if (state_.dispense_status == dial_state::DispenseStatus::kFailed) {
+    if (now_us < failed_until_us_) {
+      return false;
+    }
+    state_.dispense_status = dial_state::DispenseStatus::kIdle;
     return true;
   }
 

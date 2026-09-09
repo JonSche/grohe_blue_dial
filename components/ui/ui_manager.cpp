@@ -160,18 +160,20 @@ void UiManager::Init(lv_display_t* display) {
   lv_obj_set_style_pad_left(unit_label, 4, 0);
   lv_obj_set_style_pad_bottom(unit_label, 6, 0);
 
-  // Finished: replaces amount_row_ entirely rather than overlaying
+  // Finished/Failed: replaces amount_row_ entirely rather than overlaying
   // it, so there is never a moment both are laid out/visible at once.
-  // LV_SYMBOL_OK, not a raw "check mark" character -- it's in the private
-  // -use glyph range LVGL's built-in fonts actually ship (a literal
-  // Unicode check mark is not present in the compiled Montserrat fonts and
-  // would render as a blank/tofu glyph).
-  checkmark_label_ = lv_label_create(screen);
-  lv_label_set_text(checkmark_label_, LV_SYMBOL_OK);
-  lv_obj_set_style_text_color(checkmark_label_, kAccentColor, 0);
-  lv_obj_set_style_text_font(checkmark_label_, &lv_font_montserrat_48, 0);
-  lv_obj_align(checkmark_label_, LV_ALIGN_CENTER, 0, -16);
-  lv_obj_add_flag(checkmark_label_, LV_OBJ_FLAG_HIDDEN);
+  // LV_SYMBOL_OK/LV_SYMBOL_CLOSE, not raw check-mark/X characters --
+  // they're in the private-use glyph range LVGL's built-in fonts
+  // actually ship (literal Unicode equivalents are not present in the
+  // compiled Montserrat fonts and would render as blank/tofu glyphs).
+  // Text colour is set once here and never changes with state -- see
+  // this member's own comment in ui_manager.hpp for why.
+  status_glyph_label_ = lv_label_create(screen);
+  lv_label_set_text(status_glyph_label_, LV_SYMBOL_OK);
+  lv_obj_set_style_text_color(status_glyph_label_, kAccentColor, 0);
+  lv_obj_set_style_text_font(status_glyph_label_, &lv_font_montserrat_48, 0);
+  lv_obj_align(status_glyph_label_, LV_ALIGN_CENTER, 0, -16);
+  lv_obj_add_flag(status_glyph_label_, LV_OBJ_FLAG_HIDDEN);
 
   water_type_label_ = lv_label_create(screen);
   lv_obj_set_style_text_color(water_type_label_, kPrimaryTextColor, 0);
@@ -234,10 +236,28 @@ void UiManager::Render(const dial_state::DialState& state) {
   using dial_state::DispenseStatus;
   using dial_state::TimeStatus;
 
+  // M13.6: kFailed also desaturates the ring for its own brief hold -- a
+  // rejected command was never a connection problem, but the frozen UI
+  // spec's own micro-interaction rule ("Error: accent desaturates -- no
+  // red, no flashing, no alarm") is exactly what this state needs too, and
+  // reusing the existing ready/last_ring_ready_ guard means the "pulse"
+  // shape falls out for free from kFailed's own bounded hold in Tick() --
+  // no new lv_anim_t required.
   const bool ready = state.connection_status == ConnectionStatus::kReady &&
-                     state.time_status == TimeStatus::kAvailable;
-  const bool in_dispense_lifecycle =
-      state.dispense_status != DispenseStatus::kIdle;
+                     state.time_status == TimeStatus::kAvailable &&
+                     state.dispense_status != DispenseStatus::kFailed;
+
+  // Which amount source the ring reads from -- deliberately excludes both
+  // kIdle and kFailed (falling back to state.amount_ml for both), not just
+  // kIdle: active_dispense_amount_ml is only ever populated by a
+  // *successful* dispense outcome (see DialController::HandleCommandOutcome()),
+  // so a rejected request -- kFailed -- never populates it, and reading it
+  // anyway would show a stale/zero ring fill, contradicting the ring's own
+  // one invariant below.
+  const bool ring_uses_active_amount =
+      state.dispense_status == DispenseStatus::kDispensing ||
+      state.dispense_status == DispenseStatus::kStopping ||
+      state.dispense_status == DispenseStatus::kFinished;
 
   // The ring's one invariant (frozen UI spec): while a dispense/stop/
   // finish is in progress, its fill is the amount that pour was actually
@@ -246,7 +266,7 @@ void UiManager::Render(const dial_state::DialState& state) {
   // DialController::HandleEvent's own comment), so amount_ml can keep
   // changing mid-pour; the ring must not.
   const int ring_amount_ml =
-      in_dispense_lifecycle ? state.active_dispense_amount_ml : state.amount_ml;
+      ring_uses_active_amount ? state.active_dispense_amount_ml : state.amount_ml;
   lv_arc_set_value(arc_, ring_amount_ml);
   // Guarded (unlike lv_arc_set_value() above, LVGL's generic style path
   // always invalidates on lv_obj_set_style_arc_color(), whether or not the
@@ -260,13 +280,20 @@ void UiManager::Render(const dial_state::DialState& state) {
     last_ring_ready_ = ready;
   }
 
-  // Numeral vs. checkmark.
-  if (state.dispense_status == DispenseStatus::kFinished) {
+  // Numeral vs. status glyph (checkmark for Finished, X for Failed --
+  // M13.6). Same hidden/shown toggle against amount_row_ either way; only
+  // which symbol status_glyph_label_ shows differs.
+  if (state.dispense_status == DispenseStatus::kFinished ||
+      state.dispense_status == DispenseStatus::kFailed) {
     lv_obj_add_flag(amount_row_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(checkmark_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(status_glyph_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(status_glyph_label_,
+                      state.dispense_status == DispenseStatus::kFailed
+                          ? LV_SYMBOL_CLOSE
+                          : LV_SYMBOL_OK);
   } else {
     lv_obj_clear_flag(amount_row_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(checkmark_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(status_glyph_label_, LV_OBJ_FLAG_HIDDEN);
     const bool counting_up = state.dispense_status == DispenseStatus::kDispensing ||
                              state.dispense_status == DispenseStatus::kStopping;
     lv_label_set_text_fmt(amount_label_, "%d",
@@ -321,6 +348,19 @@ void UiManager::Render(const dial_state::DialState& state) {
         break;
       case DispenseStatus::kFinished:
         lv_label_set_text(hint_label_, "");
+        break;
+      case DispenseStatus::kFailed:
+        // M13.6: shown for the generic kFailed state -- there is still
+        // no per-response_code classification (deliberately; see
+        // docs/ui/error_feedback_concepts.md: no new error
+        // classification this milestone). Copy changed from the
+        // original generic "Try again" to "Bad credentials" after
+        // hardware testing with deliberately wrong BLE credentials
+        // confirmed this is, in practice, the rejection this milestone
+        // actually surfaces. It's still a guess dressed as a specific
+        // message, not a verified classification: any other rejection
+        // reason (e.g. GUEST_MODE_DISABLED) shows the same text today.
+        lv_label_set_text(hint_label_, "Bad credentials");
         break;
     }
   }

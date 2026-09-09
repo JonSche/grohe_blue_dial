@@ -895,6 +895,86 @@ complete security posture).
 - [ ] Only if M13.1-M13.4 are stable. Secondary by design: the encoder/
       button already provide this locally.
 
+### M13.6 — Dispense failure feedback (implemented, hardware-verified)
+
+Found during M13.1/M13.2 hardware validation: `/provision` was used to
+store deliberately invalid test credentials, provisioning itself
+succeeded (`200 OK`), and the subsequent dispense attempt then failed
+exactly as the BLE protocol says it should (`INVALID_HMAC`) -- but the
+display showed nothing at all. No water ran, no text appeared, the ring
+didn't change, and the connection dot stayed solid blue throughout. For
+a standalone device with no companion app and no serial monitor, that's
+a real gap: the user has no way to tell "still working" from "already
+failed."
+
+See [`docs/ui/error_feedback_concepts.md`](ui/error_feedback_concepts.md)
+for the full design study (current-architecture analysis, four UI
+concepts evaluated against the frozen dispense-UI spec's own house
+rules, a recommendation, and a proposed error classification) and its
+companion mockup artifact (linked from that document) for the visual
+storyboard at real 240 px proportions.
+
+- [x] **Design study complete**: root cause traced to
+      `DialController::HandleCommandOutcome()` discarding a rejected
+      dispense's outcome (logged, never reaches `DialState`) -- a side
+      effect of M11.1's deliberate removal of raw protocol-code display,
+      not a new decision. Four concepts evaluated (temporary overlay,
+      dedicated error screen, inline text only, a transient fail glyph
+      reusing the existing `Finished` checkmark mechanism); the last is
+      recommended -- zero new LVGL widgets/screens/navigation, reads at
+      a glance, and is structurally distinct from a real BLE disconnect
+      (a one-shot ~1.5 s pulse vs. a sustained state) rather than reusing
+      its exact visual signature. Confirmed via `dial_state.hpp`'s own
+      existing "never conflate independent subsystems" principle
+      (already applied to `ConnectionStatus`/`TimeStatus`) that the BLE
+      connection dot should stay connection-only, never mixed with
+      command-result -- matching the direction already leaned toward
+      before this study.
+- [x] **Implemented**: Concept D (transient fail glyph), exactly as
+      recommended. `dial_state::DispenseStatus` gained one new
+      enumerator, `kFailed`, entered directly from `kIdle` by
+      `DialController::HandleCommandOutcome()` on a rejected dispense
+      request (`outcome.was_dispense && dispense_status == kIdle`); a
+      rejected *stop* is unaffected and still reverts to `kDispensing`
+      as before. Mirrors the existing `kFinished` mechanism exactly: a
+      fixed ~1.5 s hold (`DialController::kFailedHoldUs`) tracked the
+      same way as `finished_until_us_`, read by the same `Tick()`, no
+      button press required to leave it. `UiManager` reuses the
+      checkmark's own widget slot (renamed `status_glyph_label_` since
+      it now serves two symbols) showing `LV_SYMBOL_CLOSE` instead of
+      `LV_SYMBOL_OK`; `hint_label_` shows "Bad credentials" (see below
+      for why this replaced the original "Try again"); the ring
+      desaturates for the hold's duration via the *existing*
+      `ready`/`last_ring_ready_` guard (no new `lv_anim_t`). No new
+      widgets, no new navigation, no permanent error screen, no red/
+      blinking treatment. The BLE connection dot is untouched by any of
+      this -- `connection_status` has no pathway from
+      `HandleCommandOutcome()`, so "BLE connected + command rejected"
+      stays representable exactly as the design study required.
+      `idf.py build` is clean (no new compiler warnings on the touched
+      files). `LV_SYMBOL_CLOSE`'s availability, flagged as unverified in
+      the design study, is now confirmed **at compile time** (same
+      symbol font as the already-working `LV_SYMBOL_OK`) -- see the next
+      bullet for what's actually verified on-device.
+- [x] **Hardware-verified**: wrong-credentials dispense request tested
+      end-to-end on real hardware (`/provision` given deliberately
+      invalid `user_id`/`preshared_key_base64`, then a dispense
+      attempted) -- the glyph appears immediately, no water runs, ring
+      desaturation is visible but subtle, auto-return to Ready lands
+      cleanly at ~1.5 s, and the connection dot stays solid blue
+      throughout since the BLE link itself never drops. The `hint_label_`
+      copy was changed from the originally-tested "Try again" to the
+      more specific "Bad credentials" *after* this hardware run, purely
+      as a `lv_label_set_text()` string swap on the same already-verified
+      code path (no change to timing, layout, glyph, or the ring) --
+      still a generic `kFailed` message, not a real per-`response_code`
+      classification (see `docs/ui/error_feedback_concepts.md` §5). Text
+      width was checked against the existing, already-shipping
+      "Connection lost" hint (same 16-character length, similar-or-wider
+      per the font's own character widths) rather than re-measured on
+      hardware; `hint_label_` has no fixed width/wrap configured, so it
+      cannot truncate text at the widget level either way.
+
 ## v1.0 Release Criteria
 
 What "version 1.0" means for this project -- the minimum bar for the
