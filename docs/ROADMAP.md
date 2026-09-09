@@ -771,17 +771,104 @@ already owns.
       ESP-IDF firmware repo with no host-side harness -- see M12's own
       precedent) to substitute for it.
 
-### M13.2 — Local provisioning endpoint
+### M13.2 — Local provisioning endpoint ✅
 
-- [ ] `POST /provision` (new `components/provisioning/`, reusing M12's
-      `esp_http_server`/shared-secret-header/constant-time-compare/
-      fail-closed pattern, but with its own separate secret, never the
-      OTA token) -- permanently reachable whenever Wi-Fi is connected,
-      no button/gesture gating. Validates the full request before
-      touching NVS, then calls `NvsCredentialsProvider::Set()`.
-- [ ] Authenticated `curl`-based local test path (mirroring
-      `scripts/ota.sh`'s own precedent), covering both first-time
-      provisioning and replacing already-provisioned credentials.
+See [ARCHITECTURE.md](ARCHITECTURE.md#provisioning-m132) for the full
+design (why a separate `esp_http_server` instance/port from OTA's,
+request/response format, credential-activation behavior, and the
+complete security posture).
+
+- [x] `POST /provision` (new `components/provisioning/`,
+      `provisioning::ProvisioningServer`) -- its own `esp_http_server`
+      instance on its own port (`8080`; OTA already owns port 80 and
+      `components/ota/` is untouched by this milestone), reusing OTA's
+      shared-secret-header/constant-time-compare/fail-closed *pattern*
+      with its own separate secret (`X-Provision-Token`, gitignored
+      `provisioning_secret_local.hpp`) -- never the OTA token.
+      Permanently reachable whenever Wi-Fi is connected: no button/
+      gesture gating, no temporary provisioning window (this dial has
+      exactly one physical button, already assigned to dispensing/stop
+      and the water-type cycle -- M13.2 adds no new interaction to it).
+- [x] Request: `{"user_id": "...", "preshared_key_base64": "..."}`,
+      parsed with cJSON (ESP-IDF's bundled `json` component). Validates
+      the complete request (auth header, JSON well-formedness, field
+      presence/type/non-empty/length against
+      `grohe_ble::kMaxCredentialFieldLen`) *before* ever calling
+      `NvsCredentialsProvider::Set()`, which itself writes the whole
+      `{user_id, preshared_key}` pair as one atomic NVS blob (M13.1's
+      own mechanism, reused here rather than inventing a second
+      credential store) -- an invalid request touches no NVS state at
+      all, and a request that fails inside `Set()` leaves whatever was
+      already stored untouched. `200 OK` only after a successful commit.
+- [x] Status codes: `200` (stored), `400` (malformed JSON or missing/
+      invalid fields), `401` (missing or wrong `X-Provision-Token`),
+      `500` (valid request, NVS-level failure). No credential value ever
+      appears in a response body, a log line, or an error message.
+- [x] Credential activation: no reboot required. `NvsCredentialsProvider
+      ::Set()` already updates its own in-memory cache immediately (a
+      genuine M13.1 property, not new complexity added for this
+      milestone), and `GroheClient` reads credentials fresh on every
+      command it sends -- the next dispense/stop after a successful
+      `/provision` call uses the new credentials automatically. The
+      response body reports `"reboot_required": false` explicitly.
+- [x] `ProvisioningServer` wired into `app::App` as `WifiConnection`'s
+      third consumer (after `SntpTimeProvider`, `OtaServer`), same
+      non-blocking/non-fatal shape as the other two -- Wi-Fi/BLE/
+      dispensing/UI/startup never depend on it. Without any provisioned
+      credentials, `grohe_ble::LocalCredentialsProvider` continues to
+      work exactly as before M13 started.
+- [x] Verified: clean `idf.py build`, zero new warnings from any
+      touched/new file; the JSON request-validation logic specifically
+      re-verified in a standalone host-side harness (cJSON is portable
+      C, compiled outside ESP-IDF for this) against nine cases --
+      valid request, malformed JSON, missing `user_id`, missing
+      `preshared_key_base64`, empty `user_id`, non-string `user_id`,
+      empty body, a non-object body, and a 200-byte over-length field --
+      all nine matched their expected accept/reject outcome. Scope diff
+      confirms `components/ota/` and `scripts/ota.sh` are untouched, and
+      no BLE protocol, Wi-Fi, UI, or display file was touched beyond the
+      M13.1 seams this milestone reuses.
+- [ ] **Not yet done from this environment: hardware validation**
+      (fail-closed with no secret configured, `401` for a missing/wrong
+      token, `400` for malformed JSON/missing fields, `200` + an actual
+      NVS write for a valid request, and that an invalid request leaves
+      previously-provisioned credentials untouched). No physical
+      hardware or Wi-Fi network reachable here, the same limitation
+      every hardware-dependent milestone before this one has ended on.
+      Prepared `curl` commands for that pass, once real hardware is
+      available (`<token>` is whatever
+      `provisioning_secret_local.hpp` was filled in with):
+
+      ```sh
+      # Missing token -> 401
+      curl -i -X POST http://<device-ip>:8080/provision \
+        -H "Content-Type: application/json" \
+        -d '{"user_id":"abc","preshared_key_base64":"xyz"}'
+
+      # Wrong token -> 401
+      curl -i -X POST http://<device-ip>:8080/provision \
+        -H "X-Provision-Token: wrong-token" \
+        -H "Content-Type: application/json" \
+        -d '{"user_id":"abc","preshared_key_base64":"xyz"}'
+
+      # Malformed JSON -> 400
+      curl -i -X POST http://<device-ip>:8080/provision \
+        -H "X-Provision-Token: <token>" \
+        -H "Content-Type: application/json" \
+        -d '{"user_id": "abc", '
+
+      # Missing field -> 400
+      curl -i -X POST http://<device-ip>:8080/provision \
+        -H "X-Provision-Token: <token>" \
+        -H "Content-Type: application/json" \
+        -d '{"user_id":"abc"}'
+
+      # Valid request -> 200
+      curl -i -X POST http://<device-ip>:8080/provision \
+        -H "X-Provision-Token: <token>" \
+        -H "Content-Type: application/json" \
+        -d '{"user_id":"abc-123","preshared_key_base64":"c29tZWJhc2U2NA=="}'
+      ```
 
 ### M13.3 — MQTT client & Home Assistant Discovery
 

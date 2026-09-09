@@ -80,6 +80,18 @@ void App::Run() {
   // NvsCredentialsProvider::Init()'s own comment.
   grohe_credentials_provider_.Init();
 
+  // M13.2: non-blocking, same shape as ota_server_.Init() above --
+  // registers a permanent Wi-Fi acquisition and starts the provisioning
+  // HTTP server once it comes up (or logs and does nothing if no
+  // provisioning secret is configured). Placed after
+  // grohe_credentials_provider_.Init() (just above), not next to
+  // ota_server_.Init(), purely so a reader never has to wonder whether
+  // the credentials provider a provisioning request would update is
+  // already loaded by the time this starts accepting connections --
+  // functionally the two orderings are equivalent, since no real
+  // request can arrive before Wi-Fi itself finishes associating anyway.
+  provisioning_server_.Init();
+
   // BLE is not allowed to take the rest of the firmware down with it: the
   // dial still has to work (display, encoder, UI) even if the radio never
   // comes up, so this is a log, not an ESP_ERROR_CHECK.

@@ -51,6 +51,22 @@ Security reports are in scope for:
   known and out of scope; reports of a way to bypass the shared-secret
   check entirely, or a memory-safety bug in the upload handler, are very
   much in scope.
+- **Provisioning** ([`components/provisioning/`](components/provisioning/)):
+  the local-network HTTP endpoint (`POST /provision`) that writes Grohe
+  BLE credentials into NVS — shared-secret handling (a token separate
+  from the OTA one above), JSON request parsing, and the NVS write path.
+  **Same posture as OTA: plain HTTP, no TLS, a single shared secret,
+  permanently reachable whenever Wi-Fi is connected** — see
+  [ARCHITECTURE.md](docs/ARCHITECTURE.md#provisioning-m132) for the full
+  rationale and threat model. This endpoint is more consequential than
+  OTA's if compromised — the request body itself carries the Grohe BLE
+  credentials in the clear, not just an update payload — so reports that
+  this isn't TLS-encrypted are already known and out of scope for the
+  same documented reason OTA's are, but reports of a way to bypass the
+  provisioning-token check, reuse the OTA token to provision (it must
+  not work — the two are deliberately separate secrets), or a
+  memory-safety/parsing bug in the request handler are very much in
+  scope.
 
 Out of scope: vulnerabilities in ESP-IDF, NimBLE, mbedTLS, or any other
 upstream dependency this firmware builds on — please report those to their

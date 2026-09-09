@@ -20,3 +20,9 @@ components/time_service/include/time_service/wifi_credentials_local.hpp
 # endpoint) -- never committed. See
 # components/ota/include/ota/ota_secret_local.hpp.example.
 components/ota/include/ota/ota_secret_local.hpp
+
+# Real provisioning shared secret/token (gates the local-network
+# /provision endpoint, separate from the OTA token above) -- never
+# committed. See
+# components/provisioning/include/provisioning/provisioning_secret_local.hpp.example.
+components/provisioning/include/provisioning/provisioning_secret_local.hpp

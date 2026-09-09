@@ -7,6 +7,8 @@
 #include "grohe_ble/grohe_credentials.hpp"
 #include "ota/ota_secret.hpp"
 #include "ota/ota_server.hpp"
+#include "provisioning/provisioning_secret.hpp"
+#include "provisioning/provisioning_server.hpp"
 #include "settings/dial_settings.hpp"
 #include "time_service/wifi_connection.hpp"
 #include "time_service/wifi_credentials.hpp"
@@ -83,10 +85,24 @@ class App {
   // M13.1: NVS-backed BLE credentials, falling back to the existing
   // gitignored-local-header developer credentials whenever nothing has
   // been provisioned -- see grohe_credentials.hpp's own comment.
-  // Declared before grohe_client_ so it can be passed by reference to
-  // that constructor (member init order follows declaration order, not
-  // the constructor-argument order below).
+  // Declared before grohe_client_/provisioning_server_ so it can be
+  // passed by reference to both of their constructors (member init order
+  // follows declaration order, not the constructor-argument order
+  // below).
   grohe_ble::NvsCredentialsProvider grohe_credentials_provider_;
+
+  // M13.2: local-network HTTP provisioning endpoint -- see
+  // components/provisioning/ and docs/ARCHITECTURE.md's "Provisioning
+  // (M13.2)" section. Independent of BLE/dispensing; Init() is
+  // non-blocking and never gates the rest of startup, same shape as
+  // ota_server_ above -- a deliberately *separate* secret
+  // (provisioning_secret_provider_, never ota_secret_provider_) and a
+  // deliberately separate esp_http_server instance/port from it too
+  // (components/ota/ itself is untouched by this milestone).
+  provisioning::LocalProvisioningSecretProvider provisioning_secret_provider_;
+  provisioning::ProvisioningServer provisioning_server_{
+      wifi_connection_, provisioning_secret_provider_,
+      grohe_credentials_provider_};
 
   grohe_ble::GroheClient grohe_client_{wifi_connection_, grohe_credentials_provider_};
 };

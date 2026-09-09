@@ -72,6 +72,16 @@ components/
                WaterType), the same "bottom of the graph" shape
                dial_state/ itself has -- no dependency on app/ or any
                other component.
+  provisioning/ ProvisioningServer (M13.2): a second, independent
+               esp_http_server instance (its own port -- see
+               "Provisioning (M13.2)" below for why not OTA's) exposing
+               POST /provision, gated by its own shared secret
+               (ProvisioningSecretProvider), that writes Grohe BLE
+               credentials into grohe_ble::NvsCredentialsProvider. Depends
+               on grohe_ble/ (for Credentials/NvsCredentialsProvider) and
+               time_service/ (for WifiConnection, its third consumer) --
+               no dependency on components/ota/, which this milestone
+               does not touch.
   app/         App: the composition root, plus DialController -- the
                "Application Controller" that owns the one DialState
                instance and applies the interaction rules (amount
@@ -83,7 +93,8 @@ components/
                its own. As of M13.1, App also owns the one
                DialSettingsStore and NvsCredentialsProvider instance and
                feeds the former's Values() into DialController via
-               ApplySettings() once, at startup.
+               ApplySettings() once, at startup. As of M13.2, App also
+               owns the one ProvisioningServer instance.
   firmware_info/ Read-only build metadata (version, git commit/branch/
                dirty, build date/time) -- see "Firmware metadata (M12.3)"
                below. Depends only on esp_app_format; nothing else in this
@@ -108,6 +119,7 @@ app --> dial_state
 app --> firmware_info --> (esp_app_format)
 app --> time_service --> (esp_wifi, esp_netif, esp_event, lwip, nvs_flash)
 app --> settings  --> dial_state
+app --> provisioning --> grohe_ble, time_service
 grohe_ble --> time_service  (GroheClient's SntpTimeProvider; takes
                              WifiConnection& from app, doesn't construct
                              it -- see "Wi-Fi connectivity")
@@ -628,6 +640,107 @@ to edit), uploads with `curl`, checks the HTTP status, then polls
 `GET /version` for up to 30 s to confirm the device came back and
 report what it's now running.
 
+## Provisioning (M13.2)
+
+A second local-network HTTP endpoint, `POST /provision`, lets Home
+Assistant (M13.4, not yet built) push this dial's Grohe BLE credentials
+once, rather than the ESP32 ever implementing a second Grohe Cloud
+login itself -- see the M13 architecture proposal (project history) for
+the full "why HTTP for provisioning, MQTT for everything else"
+reasoning. Deliberately reuses OTA's transport/security *shape*
+(`esp_http_server`, plain HTTP, shared-secret header, constant-time
+compare, fail-closed on an empty secret) without touching
+`components/ota/` itself at all, and without reusing its secret.
+
+**Why a separate `esp_http_server` instance, not OTA's**:
+`esp_http_server` binds one instance per TCP port; `ota::OtaServer`
+already owns port 80 (`HTTPD_DEFAULT_CONFIG()`'s own default). Adding
+`/provision` as a second route on that same instance would mean either
+modifying `components/ota/` (out of scope for this milestone) or a new
+cross-component coupling neither `ota/` nor the new
+`components/provisioning/` needs. `provisioning::ProvisioningServer`
+therefore runs its own instance, on its own port
+(`kProvisioningPort = 8080`, `provisioning_server.cpp`) -- still plain
+HTTP, still no TLS, for the identical hardware reason OTA has none (see
+"OTA (M12)" above).
+
+**Request**: a single route, `POST /provision`, body
+`{"user_id": "...", "preshared_key_base64": "..."}` -- the exact two
+fields `grohe_ble::Credentials` already needs (see "BLE" below),
+nothing else. Parsed with cJSON (ESP-IDF's bundled `json` component,
+already a dependency of nothing else in this project but a standard,
+already-vendored one) rather than a hand-rolled parser. The whole body
+is read in one shot into a fixed, bounded buffer (`kMaxBodyLen`, 512
+bytes) -- unlike OTA's multi-megabyte firmware upload (never buffered
+in full), a two-field JSON body is small enough that streaming/chunking
+would be needless complexity.
+
+**Flow**, matching the order this milestone's own spec requires
+(authenticate and validate the complete request *before* any NVS
+write, exactly once, only on full success):
+`IsAuthorized()` (header check) -> body-size check -> read body ->
+`cJSON_Parse` -> field presence/type/length validation
+(`grohe_ble::kMaxCredentialFieldLen`, shared with
+`NvsCredentialsProvider`'s own on-disk field size so a too-long field
+is correctly reported as `400`, not `500`) ->
+`grohe_ble::NvsCredentialsProvider::Set()` (that single atomic blob
+write -- see "BLE" below and M13.1's own history) -> `200 OK`. Any
+failure before the `Set()` call touches no NVS state at all; a failure
+*inside* `Set()` (a genuine NVS-level fault, not a bad request) leaves
+whatever credentials were already stored completely untouched -- see
+that function's own comment.
+
+**Status codes**: `200` (stored), `400` (missing provisioning-secret
+header value doesn't apply here -- that's `401` -- malformed JSON,
+missing/empty/non-string/too-long fields), `401` (missing or wrong
+`X-Provision-Token`), `500` (the request was valid but `Set()` itself
+failed -- an NVS-level fault). No credential value ever appears in a
+response body, success or failure.
+
+**No hardware-button gating, deliberately**: this dial has exactly one
+physical button, already assigned to dispensing/stop and the long-press
+water-type cycle (see `app::DialController::HandleEvent()`) -- M13.2
+adds no new interaction to it, and `/provision` is not behind any
+button-hold or timed "pairing window" the way some IoT onboarding flows
+work. It is reachable for as long as Wi-Fi is connected, full stop; the
+security boundary is the provisioning token plus the local-network
+assumption this whole project already makes for OTA, not a physical
+gesture.
+
+**Credential activation, no reboot required**: `NvsCredentialsProvider::
+Set()` (M13.1) already updates its own in-memory cache immediately on a
+successful NVS write, before returning. `grohe_ble::GroheClient` reads
+`credentials_provider_.Get()` fresh on every single command it builds
+(`SendCommand()`, `grohe_client.cpp`) -- nothing caches credentials at
+BLE-connect time. The very next dispense/stop command sent after a
+successful `/provision` call therefore signs with the new credentials,
+whether or not a BLE connection is already established; wrong
+credentials simply produce the appliance's existing, already-handled
+`INVALID_HMAC` response, not a crash or a stuck state. `/provision`'s
+own success response reports `"reboot_required": false` accordingly --
+this was a deliberate choice to accurately describe M13.1's existing
+architecture, not a new hot-reload mechanism built for this milestone.
+
+**Security**: a single shared secret
+(`provisioning::ProvisioningSecretProvider`, gitignored
+`provisioning_secret_local.hpp` -- same local-header pattern as
+`ota::OtaSecretProvider`/`grohe_ble::CredentialsProvider`/
+`time_service::WifiCredentialsProvider`, same "empty means disabled,
+never means unauthenticated" default) -- deliberately a *different*
+secret from the OTA token, so a leaked/misused one never grants the
+other's capability. Checked with the same best-effort constant-time
+comparison OTA uses (duplicated, not shared, so `components/
+provisioning/` has no dependency on `components/ota/` at all). **Not
+Internet-grade security**, for the identical reasons already documented
+for OTA: no TLS, so both the token and the provisioned credentials
+themselves cross the network in the clear during that one request; no
+rate limiting; no replay protection. This makes `/provision`'s own
+security posture *more* consequential than OTA's -- OTA's payload
+(firmware) being sniffed isn't a credential disclosure, whereas this
+literally is -- so treat the provisioning token, and the local network
+it's used on, accordingly. Appropriate for a trusted local Wi-Fi
+network only; see `SECURITY.md`.
+
 ## Dispense UI (M11)
 
 Implements `docs/ui/dispense_animation_mockups.md` (the frozen UI spec)
@@ -800,8 +913,9 @@ peripheral, so a generic reusable BLE layer is premature abstraction.
   (M13.1 — previously a hardcoded `LocalCredentialsProvider` member); which
   concrete implementation it actually gets is `app::App`'s decision, the
   composition root, the same as every other injected dependency in this
-  codebase. Provisioning `NvsCredentialsProvider` itself (the local HTTP
-  endpoint that calls its `Set()`) is M13.2, not yet built.
+  codebase. Provisioning `NvsCredentialsProvider` itself -- the local
+  HTTP endpoint that calls its `Set()` -- is `provisioning::
+  ProvisioningServer` (M13.2); see "Provisioning (M13.2)" above.
 - **`GroheClient`** is a thin facade over `BleManager` and `GroheProtocol`
   — the one class `app/` is allowed to talk to for BLE, mirroring how
   `app/` never reaches past `display`/`encoder`/`ui`'s own top-level

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 // Credentials required to HMAC-sign a Grohe Blue BLE command (see
 // grohe_auth.hpp), abstracted behind CredentialsProvider so a future
 // milestone can supply them from the cloud API or NVS-backed secure storage
@@ -21,6 +23,16 @@ struct Credentials {
   const char* user_id;
   const char* pre_shared_key_base64;
 };
+
+// Maximum length (including the NUL terminator) either Credentials field
+// may occupy -- matches NvsCredentialsProvider's own fixed on-disk field
+// size (nvs_credentials_provider.cpp) exactly. Exposed here, not kept a
+// private implementation detail, so a caller validating input *before*
+// handing it to Set() (M13.2's local provisioning endpoint,
+// components/provisioning/) can reject an over-long field with a precise
+// 400 rather than relying on Set()'s own defensive check, which -- correct
+// as it is -- has no way to report anything more specific than "failed".
+inline constexpr size_t kMaxCredentialFieldLen = 128;
 
 class CredentialsProvider {
  public:
@@ -80,8 +92,8 @@ class NvsCredentialsProvider final : public CredentialsProvider {
  private:
   LocalCredentialsProvider local_fallback_;
   bool provisioned_ = false;
-  char user_id_[128] = {};
-  char pre_shared_key_base64_[128] = {};
+  char user_id_[kMaxCredentialFieldLen] = {};
+  char pre_shared_key_base64_[kMaxCredentialFieldLen] = {};
   Credentials cached_{};
 };
 

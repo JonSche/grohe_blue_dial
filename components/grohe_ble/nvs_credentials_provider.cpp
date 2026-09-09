@@ -15,13 +15,17 @@ constexpr char kKey[] = "creds";
 // On-disk layout -- fixed-size, POD, written/read as a single blob. See
 // NvsCredentialsProvider::Set()'s own comment (grohe_credentials.hpp) for
 // why one blob, not two separate keys, is what makes this update behave
-// atomically. 128 bytes is a generous bound for either field (an OIDC
-// "sub" claim is typically a short UUID; the observed pre-shared key is
-// well under this too) -- matches ota::OtaServer's own token buffer size
-// for the same "generous but bounded" reasoning.
+// atomically. kMaxCredentialFieldLen (128 bytes) is a generous bound for
+// either field (an OIDC "sub" claim is typically a short UUID; the
+// observed pre-shared key is well under this too) -- matches
+// ota::OtaServer's own token buffer size for the same "generous but
+// bounded" reasoning. Shared with Credentials's own field-length limit
+// (grohe_credentials.hpp) so a caller validating input before calling
+// Set() -- M13.2's local provisioning endpoint -- checks against the
+// exact same bound this layout actually enforces.
 struct StoredCredentials {
-  char user_id[128];
-  char pre_shared_key_base64[128];
+  char user_id[kMaxCredentialFieldLen];
+  char pre_shared_key_base64[kMaxCredentialFieldLen];
 };
 }  // namespace
 
