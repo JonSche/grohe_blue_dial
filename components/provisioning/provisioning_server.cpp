@@ -111,6 +111,19 @@ void ProvisioningServer::Init() {
 void ProvisioningServer::StartServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = kProvisioningPort;
+  // Hardware-found (M13.2): HTTPD_DEFAULT_CONFIG()'s own ctrl_port default
+  // (ESP_HTTPD_DEF_CTRL_PORT, 32768) is a fixed loopback UDP port every
+  // esp_http_server instance uses for its own internal task signaling,
+  // independent of server_port. ota::OtaServer's instance (also
+  // HTTPD_DEFAULT_CONFIG()-based, port 80) already claims that same
+  // default, started earlier in App::Run() -- left unset here, this
+  // instance's own httpd_start() would bind server_port 8080 successfully
+  // and then immediately fail (and roll that bind back) trying to create
+  // its control socket on the now-already-taken 32768, so nothing would
+  // ever actually end up listening on 8080. Reusing kProvisioningPort
+  // itself is safe: ctrl_port and server_port are unrelated namespaces
+  // (loopback UDP vs. any-interface TCP), so there's no self-collision.
+  config.ctrl_port = kProvisioningPort;
   config.max_uri_handlers = 1;
   config.max_open_sockets = 2;
   config.lru_purge_enable = true;
