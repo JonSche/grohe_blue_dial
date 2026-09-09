@@ -9,8 +9,10 @@ namespace {
 constexpr char kTag[] = "grohe_client";
 }  // namespace
 
-GroheClient::GroheClient(time_service::WifiConnection& wifi_connection)
-    : time_provider_(wifi_connection) {}
+GroheClient::GroheClient(time_service::WifiConnection& wifi_connection,
+                         const CredentialsProvider& credentials_provider)
+    : credentials_provider_(credentials_provider),
+      time_provider_(wifi_connection) {}
 
 esp_err_t GroheClient::Init() {
   // Non-fatal, same reasoning as BleManager's own failures below: a Wi-Fi/

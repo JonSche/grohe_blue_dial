@@ -58,7 +58,20 @@ components/
                below). GroheClient is a thin facade over it -- the one
                class app/ is allowed to talk to for BLE, following the
                same "app never reaches past the facade" pattern as
-               display/encoder/ui.
+               display/encoder/ui. CredentialsProvider (M13.1) is the
+               injected-dependency seam GroheClient reads BLE credentials
+               through -- LocalCredentialsProvider (a gitignored,
+               compile-time header, developer-only) and
+               NvsCredentialsProvider (M13.1's own, runtime-provisioned,
+               NVS-backed) both implement it; see "BLE" below.
+  settings/    DialSettingsStore: NVS-backed default dispense amount,
+               encoder step size, and default water type (M13.1) --
+               overrides on top of dial_state.hpp's own compile-time
+               constants, which remain the fallback for a device with
+               nothing stored. Depends only on dial_state/ (for
+               WaterType), the same "bottom of the graph" shape
+               dial_state/ itself has -- no dependency on app/ or any
+               other component.
   app/         App: the composition root, plus DialController -- the
                "Application Controller" that owns the one DialState
                instance and applies the interaction rules (amount
@@ -67,7 +80,10 @@ components/
                EncoderInput::Poll() -> DialController::HandleEvent() ->
                UiManager::Render(), and separately drains
                GroheClient::Poll() the same way; it contains no rules of
-               its own.
+               its own. As of M13.1, App also owns the one
+               DialSettingsStore and NvsCredentialsProvider instance and
+               feeds the former's Values() into DialController via
+               ApplySettings() once, at startup.
   firmware_info/ Read-only build metadata (version, git commit/branch/
                dirty, build date/time) -- see "Firmware metadata (M12.3)"
                below. Depends only on esp_app_format; nothing else in this
@@ -91,6 +107,7 @@ app --> grohe_ble --> (bt/nimble, nvs_flash)
 app --> dial_state
 app --> firmware_info --> (esp_app_format)
 app --> time_service --> (esp_wifi, esp_netif, esp_event, lwip, nvs_flash)
+app --> settings  --> dial_state
 grohe_ble --> time_service  (GroheClient's SntpTimeProvider; takes
                              WifiConnection& from app, doesn't construct
                              it -- see "Wi-Fi connectivity")
@@ -767,15 +784,24 @@ peripheral, so a generic reusable BLE layer is premature abstraction.
   "free of any BLE or cloud logic" scoping — these are pure functions over
   plain bytes, with no knowledge of BLE, credentials storage, or the Grohe
   payload format itself.
-- **`grohe_credentials.hpp`/`.cpp`** (M7): a small `CredentialsProvider`
-  interface (`Get() -> const Credentials&`) so `BuildStopPayload()` never
-  depends on *where* the user ID / pre-shared key come from. The only
-  implementation today, `LocalCredentialsProvider`, reads them from a
-  gitignored local header (`credentials_local.hpp`; see
-  `credentials_local.hpp.example` and `.gitignore`) — mirroring the Python
-  reference's own gitignored `.env`. No secret is ever committed. A future
-  milestone can add a cloud- or NVS-backed provider without touching
-  `GroheProtocol` or `GroheClient`.
+- **`grohe_credentials.hpp`/`.cpp`/`nvs_credentials_provider.cpp`** (M7,
+  extended M13.1): a small `CredentialsProvider` interface (`Get() ->
+  const Credentials&`) so `BuildStopPayload()` never depends on *where*
+  the user ID / pre-shared key come from. Two implementations today:
+  `LocalCredentialsProvider` reads them from a gitignored local header
+  (`credentials_local.hpp`; see `credentials_local.hpp.example` and
+  `.gitignore`) — mirroring the Python reference's own gitignored `.env`,
+  development-only, no secret ever committed — and `NvsCredentialsProvider`
+  (M13.1), which reads/writes a runtime-provisioned pair from NVS (a
+  single blob entry, `Set()`'s own comment explains why one write rather
+  than two separate keys), falling back to an owned
+  `LocalCredentialsProvider` whenever nothing has been provisioned yet.
+  `GroheClient` takes a `const CredentialsProvider&` in its constructor
+  (M13.1 — previously a hardcoded `LocalCredentialsProvider` member); which
+  concrete implementation it actually gets is `app::App`'s decision, the
+  composition root, the same as every other injected dependency in this
+  codebase. Provisioning `NvsCredentialsProvider` itself (the local HTTP
+  endpoint that calls its `Set()`) is M13.2, not yet built.
 - **`GroheClient`** is a thin facade over `BleManager` and `GroheProtocol`
   — the one class `app/` is allowed to talk to for BLE, mirroring how
   `app/` never reaches past `display`/`encoder`/`ui`'s own top-level

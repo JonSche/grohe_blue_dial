@@ -4,8 +4,10 @@
 #include "display/gc9a01_display.hpp"
 #include "encoder/encoder_input.hpp"
 #include "grohe_ble/grohe_client.hpp"
+#include "grohe_ble/grohe_credentials.hpp"
 #include "ota/ota_secret.hpp"
 #include "ota/ota_server.hpp"
+#include "settings/dial_settings.hpp"
 #include "time_service/wifi_connection.hpp"
 #include "time_service/wifi_credentials.hpp"
 #include "ui/ui_manager.hpp"
@@ -46,6 +48,15 @@ class App {
   encoder::EncoderInput encoder_input_;
   DialController dial_controller_;
 
+  // M13.1: persisted (NVS-backed) default amount/encoder step/default
+  // water type -- see components/settings/. Independent of Wi-Fi/BLE;
+  // Init() runs early in App::Run(), and its Values() are fed into
+  // dial_controller_ via ApplySettings() once, before the first render,
+  // so the very first frame already reflects any stored settings rather
+  // than dial_state.hpp's compile-time ones getting shown and then
+  // silently replaced.
+  settings::DialSettingsStore dial_settings_;
+
   // The one Wi-Fi connection this firmware ever brings up, used by
   // grohe_client_'s own SntpTimeProvider (a one-shot SNTP time source) --
   // SntpTimeProvider doesn't own Wi-Fi itself, it takes a reference to
@@ -69,7 +80,15 @@ class App {
   ota::LocalOtaSecretProvider ota_secret_provider_;
   ota::OtaServer ota_server_{wifi_connection_, ota_secret_provider_};
 
-  grohe_ble::GroheClient grohe_client_{wifi_connection_};
+  // M13.1: NVS-backed BLE credentials, falling back to the existing
+  // gitignored-local-header developer credentials whenever nothing has
+  // been provisioned -- see grohe_credentials.hpp's own comment.
+  // Declared before grohe_client_ so it can be passed by reference to
+  // that constructor (member init order follows declaration order, not
+  // the constructor-argument order below).
+  grohe_ble::NvsCredentialsProvider grohe_credentials_provider_;
+
+  grohe_ble::GroheClient grohe_client_{wifi_connection_, grohe_credentials_provider_};
 };
 
 }  // namespace app

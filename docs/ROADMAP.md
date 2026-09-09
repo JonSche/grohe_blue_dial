@@ -694,19 +694,119 @@ Home Assistant extends the product; it never becomes a runtime dependency
 of it -- the same "optional, not a dependency" principle M9 already
 established for Wi-Fi/SNTP. Local BLE operation always has priority, and
 the dial must remain fully usable -- dispensing, stopping, reconnecting,
-everything it already does today -- whether or not Home Assistant is
-present or reachable. Home Assistant's role here is primarily
-configuration, diagnostics, and appliance status (CO₂, filter, firmware),
-not basic dispensing, which the dial already handles entirely on its own.
+everything it already does today -- whether or not Home Assistant or
+Wi-Fi is present or reachable.
 
-- [ ] Home Assistant connectivity.
-- [ ] Display filter status.
-- [ ] Display CO₂ status.
-- [ ] Display firmware information.
-- [ ] Optional configuration through Home Assistant.
-- [ ] Automatic entity discovery where appropriate.
-- [ ] BLE operation must continue to work fully when Home Assistant is
-      unavailable.
+Architecture (see the M13 proposal in project history and
+[ARCHITECTURE.md](ARCHITECTURE.md) for the full reasoning): a hybrid of
+local HTTP (for one-time credential provisioning, reusing M12's OTA
+HTTP-server/auth pattern with its own separate secret) and MQTT + Home
+Assistant MQTT Discovery (for ongoing state, settings, and optional
+control). No cloud code of any kind enters this firmware -- Home
+Assistant's existing `grohe_smarthome` integration already handles Grohe
+Cloud login and appliance discovery; this project only ever consumes
+that, via a new, minimal `grohe_dial` HA integration, never duplicates
+it. Concretely, the dial does **not** publish CO₂, filter level, or the
+*appliance's* firmware version -- those already exist as
+`grohe_smarthome`-owned entities, sourced from the cloud (a BLE-only
+client structurally cannot read them at all; see the M13 proposal's
+research). Home Assistant's role here is the dial's *own* state and
+settings (availability, the dial's own firmware version, default
+amount/encoder step/default water type, optionally live dispense
+state/control) -- never appliance diagnostics the existing integration
+already owns.
+
+### M13.1 — Persistent settings & runtime credentials ✅
+
+- [x] New `components/settings/` (`settings::DialSettingsStore`): NVS-
+      backed default dispense amount, encoder step size, and default
+      water type -- overrides on top of `dial_state.hpp`'s own
+      compile-time constants, which remain the fallback for a device
+      with nothing stored. Validates before persisting (in-range
+      amount/step, a real `WaterType`) and again on load, so a
+      corrupt/out-of-range stored entry falls back to the compile-time
+      defaults rather than producing broken behavior. Independent of
+      `app/` and everything above `dial_state/` in the dependency graph.
+- [x] `app::DialController::ApplySettings()`: applies loaded settings
+      once, at startup, before the first UI render -- the encoder's
+      rotate step (`HandleEvent()`'s `kRotateCw`/`kRotateCcw` cases) now
+      reads a member overridden by this call instead of
+      `dial_state::kAmountStepMl` directly. Skipping the call entirely
+      leaves behavior identical to before this milestone.
+- [x] New `grohe_ble::NvsCredentialsProvider` (`grohe_credentials.hpp`/
+      `nvs_credentials_provider.cpp`), alongside the existing
+      `LocalCredentialsProvider`, not replacing it: reads/writes a
+      provisioned `{user_id, preshared_key}` pair from/to NVS as a
+      single blob entry (not two separate keys) -- the concrete
+      mechanism behind "no partially-written credential set" this
+      milestone's own scope calls for, since a torn/interrupted write
+      is caught by NVS's own per-entry CRC on the next read rather than
+      ever surfacing as a mix of old and new values. Falls back to an
+      owned `LocalCredentialsProvider` whenever nothing is provisioned
+      yet or a stored entry fails validation -- provisioning is strictly
+      additive to the existing developer workflow. Never logs either
+      field's value, only lengths/success/failure.
+- [x] `grohe_ble::GroheClient` now takes its `CredentialsProvider` by
+      constructor injection (`const CredentialsProvider&`) instead of
+      hardcoding a `LocalCredentialsProvider` member -- the same
+      dependency-injection shape already used for `WifiConnection`/
+      `OtaSecretProvider`. `app::App` (the composition root) decides
+      which concrete provider a given build actually uses.
+- [x] No MQTT, no Home Assistant integration, no local HTTP endpoint yet
+      -- both land in later M13 sub-milestones. Nothing in BLE protocol
+      behavior, Wi-Fi, OTA, display orientation, or UI changed beyond
+      `DialController` reading settings through the new seam described
+      above.
+- [x] Verified: clean `idf.py build`, zero new warnings from any
+      touched/new file; scope diff confirms only `components/settings/`
+      (new), `components/grohe_ble/` (credentials provider + DI), and
+      `components/app/` (wiring the two into the composition root) were
+      touched -- no BLE protocol, Wi-Fi, OTA, or UI/display files.
+- [ ] **Not yet done from this environment: hardware validation** (that
+      persisted settings actually survive a reboot, and that BLE
+      dispensing still works end to end with the new injected
+      `CredentialsProvider`). No physical hardware reachable here, the
+      same limitation every hardware-dependent milestone before this one
+      has ended on. No test infrastructure exists in this project (an
+      ESP-IDF firmware repo with no host-side harness -- see M12's own
+      precedent) to substitute for it.
+
+### M13.2 — Local provisioning endpoint
+
+- [ ] `POST /provision` (new `components/provisioning/`, reusing M12's
+      `esp_http_server`/shared-secret-header/constant-time-compare/
+      fail-closed pattern, but with its own separate secret, never the
+      OTA token) -- permanently reachable whenever Wi-Fi is connected,
+      no button/gesture gating. Validates the full request before
+      touching NVS, then calls `NvsCredentialsProvider::Set()`.
+- [ ] Authenticated `curl`-based local test path (mirroring
+      `scripts/ota.sh`'s own precedent), covering both first-time
+      provisioning and replacing already-provisioned credentials.
+
+### M13.3 — MQTT client & Home Assistant Discovery
+
+- [ ] MQTT client as `WifiConnection`'s third consumer (never a hard
+      dependency for BLE/dispensing/UI/startup -- degrades exactly like
+      Wi-Fi/OTA already do), reconnect handling, Last Will/availability.
+- [ ] MQTT Discovery for the dial's own state/settings only (firmware
+      version, default amount, encoder step, default water type --
+      settings writable via command topics, persisted through
+      `DialSettingsStore::Set()`). No CO₂/filter/appliance firmware.
+
+### M13.4 — `grohe_dial` Home Assistant integration
+
+- [ ] Minimal custom integration: config flow (dial IP, provisioning
+      token, an existing `grohe_smarthome` appliance to pair with),
+      Track B credential extraction (the already-working
+      `grohe_smarthome.get_dashboard`/`get_tokens_from_username`
+      services -- no upstream `ha-grohe_smarthome`/`grohe` change
+      required for M13), one-time call to M13.2's `/provision`. No
+      polling coordinator -- MQTT Discovery owns the runtime entities.
+
+### M13.5 — Optional dispense/stop/live-state over MQTT
+
+- [ ] Only if M13.1-M13.4 are stable. Secondary by design: the encoder/
+      button already provide this locally.
 
 ## v1.0 Release Criteria
 

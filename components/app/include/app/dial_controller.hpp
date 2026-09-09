@@ -5,6 +5,7 @@
 #include "app/dispense_session.hpp"
 #include "dial_state/dial_state.hpp"
 #include "encoder/encoder_input.hpp"
+#include "settings/dial_settings.hpp"
 
 // Forward-declared rather than #include "grohe_ble/grohe_protocol.hpp" /
 // "grohe_ble/grohe_client.hpp": those headers transitively pull in
@@ -41,12 +42,28 @@ enum class DialAction {
 // ui::UiManager only ever reads the resulting State() and renders it.
 class DialController {
  public:
+  // M13.1: applies persisted/default settings (default amount, encoder
+  // step size, default water type) -- amount_step_ml_ below starts at
+  // dial_state.hpp's own compile-time kAmountStepMl, and state_'s
+  // amount_ml/water_type start at DialState's own compile-time defaults,
+  // so skipping this call entirely (or calling it with
+  // settings::DialSettings{}'s own defaults) leaves behavior identical to
+  // before this milestone. Intended to be called once, by app::App, right
+  // after constructing settings::DialSettingsStore and before the first
+  // UiManager::Render() -- see app.cpp. Clamps defensively to
+  // dial_state::kMinAmountMl/kMaxAmountMl and a positive step even though
+  // settings::DialSettingsStore itself already validates before persisting,
+  // since this method doesn't know its argument necessarily came from
+  // there.
+  void ApplySettings(const settings::DialSettings& settings);
+
   // Idle: short press -> kRequestDispense (unless a command is already in
   // flight -- see command_pending_'s own comment). Dispensing: short press
   // -> kRequestStop. Long press cycles water type (M10: Still -> Medium ->
   // Sparkling -> Still), but only while idle (meaningless mid-dispense).
   // Rotation always adjusts amount_ml regardless of status -- harmless,
-  // only affects the *next* dispense.
+  // only affects the *next* dispense (by amount_step_ml_, see
+  // ApplySettings() above).
   [[nodiscard]] DialAction HandleEvent(encoder::EncoderEvent event);
 
   // Called by App right after it attempts to actually send the command
@@ -124,6 +141,13 @@ class DialController {
  private:
   dial_state::DialState state_{};
   DispenseSession dispense_session_;
+
+  // M13.1: the encoder rotate step, in ml -- ApplySettings() overrides
+  // this from persisted settings; HandleEvent()'s kRotateCw/kRotateCcw
+  // cases read it instead of dial_state::kAmountStepMl directly. Starts
+  // at that same compile-time constant, so behavior is unchanged until
+  // ApplySettings() is ever called.
+  int amount_step_ml_ = dial_state::kAmountStepMl;
 
   // True from the moment HandleCommandSent(true) runs until
   // HandleCommandOutcome() resolves it -- debounces a rapid second press

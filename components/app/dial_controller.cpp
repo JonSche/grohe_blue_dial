@@ -59,15 +59,28 @@ constexpr int RoundDownToNearest10Ml(int64_t value_ml) {
 }
 }  // namespace
 
+void DialController::ApplySettings(const settings::DialSettings& settings) {
+  // Clamped/floored here too, even though settings::DialSettingsStore
+  // already validates before ever persisting a value -- this method
+  // doesn't know its argument necessarily came from there (a
+  // default-constructed settings::DialSettings{} is a valid, in-range
+  // argument too, and stays a no-op against the defaults below).
+  amount_step_ml_ = std::max(settings.amount_step_ml, 1);
+  state_.amount_ml = std::clamp(settings.default_amount_ml,
+                                dial_state::kMinAmountMl,
+                                dial_state::kMaxAmountMl);
+  state_.water_type = settings.default_water_type;
+}
+
 DialAction DialController::HandleEvent(encoder::EncoderEvent event) {
   using encoder::EncoderEvent;
   switch (event) {
     case EncoderEvent::kRotateCw:
-      state_.amount_ml = std::min(state_.amount_ml + dial_state::kAmountStepMl,
+      state_.amount_ml = std::min(state_.amount_ml + amount_step_ml_,
                                    dial_state::kMaxAmountMl);
       break;
     case EncoderEvent::kRotateCcw:
-      state_.amount_ml = std::max(state_.amount_ml - dial_state::kAmountStepMl,
+      state_.amount_ml = std::max(state_.amount_ml - amount_step_ml_,
                                    dial_state::kMinAmountMl);
       break;
     case EncoderEvent::kShortPress:

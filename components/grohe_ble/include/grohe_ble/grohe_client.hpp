@@ -46,14 +46,20 @@ struct CommandOutcome {
 // either of them knowing about sequencing themselves.
 class GroheClient {
  public:
-  // wifi_connection must outlive this object (dependency injection, not
-  // an owned instance -- it lives at the composition root (app::App)
-  // rather than being constructed internally here, so any future
-  // consumer could share the exact same connection; see
+  // wifi_connection/credentials_provider must both outlive this object
+  // (dependency injection, not owned instances -- both live at the
+  // composition root, app::App, rather than being constructed internally
+  // here). wifi_connection is forwarded straight through to
+  // time_provider_ -- this class has no other use for it; see
   // wifi_connection.hpp's own comment and
-  // docs/ARCHITECTURE.md#wifi-connectivity). Forwarded straight through
-  // to time_provider_ -- this class has no other use for it.
-  explicit GroheClient(time_service::WifiConnection& wifi_connection);
+  // docs/ARCHITECTURE.md#wifi-connectivity. credentials_provider (M13.1)
+  // replaces what used to be a hardcoded LocalCredentialsProvider member
+  // -- app::App now decides which CredentialsProvider implementation
+  // (grohe_ble::LocalCredentialsProvider or the NVS-backed
+  // grohe_ble::NvsCredentialsProvider) this client actually uses, the
+  // same shape as every other injected dependency in this codebase.
+  GroheClient(time_service::WifiConnection& wifi_connection,
+             const CredentialsProvider& credentials_provider);
 
   esp_err_t Init();
 
@@ -99,7 +105,7 @@ class GroheClient {
 
   BleManager ble_manager_;
   GroheProtocol protocol_;
-  LocalCredentialsProvider credentials_provider_;
+  const CredentialsProvider& credentials_provider_;
 
   // M9: time_provider_ needs a Wi-Fi connection purely as a one-shot SNTP
   // time source. That connection (time_service::WifiConnection) is

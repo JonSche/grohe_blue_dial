@@ -40,6 +40,14 @@ void App::Run() {
            firmware_info::GitBranch(), firmware_info::GitDirty() ? ", dirty" : "");
   ESP_LOGI(kTag, "Built: %s %s", firmware_info::BuildDate(), firmware_info::BuildTime());
 
+  // M13.1: local, NVS-backed, no Wi-Fi/networking involved -- loads before
+  // anything else so the very first UI render (below) already reflects
+  // any stored settings rather than dial_state.hpp's compile-time ones
+  // getting shown and then silently replaced. Never fails hard; see
+  // DialSettingsStore::Init()'s own comment.
+  dial_settings_.Init();
+  dial_controller_.ApplySettings(dial_settings_.Values());
+
   // One-time Wi-Fi driver/event-loop setup (NVS, netif, the default event
   // loop, this class's own event handlers) -- does not connect yet. Must
   // happen before grohe_client_.Init() below, which (via its own
@@ -64,6 +72,13 @@ void App::Run() {
   }
 
   ESP_ERROR_CHECK(encoder_input_.Init());
+
+  // M13.1: local, NVS-backed -- loads any previously provisioned Grohe
+  // credentials (falling back to the gitignored-local-header developer
+  // ones if none are stored) before grohe_client_.Init() ever has a
+  // chance to send a command using them. Never fails hard; see
+  // NvsCredentialsProvider::Init()'s own comment.
+  grohe_credentials_provider_.Init();
 
   // BLE is not allowed to take the rest of the firmware down with it: the
   // dial still has to work (display, encoder, UI) even if the radio never
