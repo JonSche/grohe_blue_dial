@@ -152,13 +152,47 @@ class App : public dial_api::DialApiHandler {
   // in flight through this path at once. Created in Run(), before
   // provisioning_server_.Init() can possibly start receiving requests --
   // see app.cpp.
+  //
+  // M15.1: Status() (below) now also goes through this same
+  // api_command_queue_ (kStatusQuery), answered via api_status_queue_
+  // rather than api_result_queue_ -- a status snapshot is a
+  // dial_state::DialState, not a dial_api::RequestResult, so it needs
+  // its own, differently-typed depth-1 queue; reusing api_result_queue_
+  // for both would mean giving it the size of the larger of the two
+  // payloads (and a tagged union) for no real benefit, since
+  // esp_http_server's single-worker-task model (see above) already
+  // guarantees the two are never in flight at once anyway. Fixes a real
+  // cross-task consistency gap DialController::State()'s own comment
+  // describes: App::Status() used to call it directly from the httpd
+  // task, copying dial_controller_.State() field-by-field while the app
+  // task could be mid-way through updating a *different* subset of
+  // those same fields for the same transition (e.g.
+  // HandleCommandOutcome()'s dispense_status/active_dispense_amount_ml/
+  // delivered_ml trio) -- not just stale, but a combination of fields
+  // that never coexisted as a real state. Routing the read through the
+  // app task too closes that window exactly like the write side already
+  // is.
   struct ApiCommand {
-    enum class Kind { kDispense, kStop } kind;
+    enum class Kind { kDispense, kStop, kStatusQuery } kind;
     int amount_ml = 0;
     dial_state::WaterType water_type = dial_state::WaterType::kStill;
   };
   QueueHandle_t api_command_queue_ = nullptr;
   QueueHandle_t api_result_queue_ = nullptr;
+  QueueHandle_t api_status_queue_ = nullptr;
+
+  // M15.1: the last snapshot Status() actually completed a full,
+  // consistent round-trip for -- used only as that method's own timeout
+  // fallback (see its own comment), never read or written anywhere
+  // else. mutable because Status() is const like every other
+  // dial_api::DialApiHandler read; safe despite that because Status()
+  // is the only writer, and esp_http_server's single-worker-task model
+  // (see api_command_queue_'s own comment) means it is never itself
+  // called from two tasks -- or twice concurrently -- at once.
+  // Default-constructed DialState{} until the very first successful
+  // round-trip, the same "not yet known" startup values dial_state.hpp
+  // itself already defines (kConnecting/kSyncing/kIdle/...).
+  mutable dial_state::DialState last_known_status_{};
 };
 
 }  // namespace app

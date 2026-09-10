@@ -50,6 +50,7 @@ void App::Run() {
   // mechanism these back.
   api_command_queue_ = xQueueCreate(1, sizeof(ApiCommand));
   api_result_queue_ = xQueueCreate(1, sizeof(dial_api::RequestResult));
+  api_status_queue_ = xQueueCreate(1, sizeof(dial_state::DialState));
 
   // M12.3: every build should be identifiable from its own boot log alone
   // -- see components/firmware_info/ for where each value actually comes
@@ -214,47 +215,65 @@ void App::Run() {
     // there yet.
     ApiCommand api_command;
     if (xQueueReceive(api_command_queue_, &api_command, 0) == pdTRUE) {
-      DialAction action = DialAction::kNone;
-      switch (api_command.kind) {
-        case ApiCommand::Kind::kDispense:
-          action = dial_controller_.RequestDispenseAction(api_command.amount_ml,
-                                                           api_command.water_type);
-          break;
-        case ApiCommand::Kind::kStop:
-          action = dial_controller_.RequestStopAction();
-          break;
-      }
-      dial_api::RequestResult result = dial_api::RequestResult::kRejectedNotAvailable;
-      switch (action) {
-        case app::DialAction::kRequestDispense: {
-          state_changed = true;
-          const auto& state = dial_controller_.State();
-          const bool accepted = grohe_client_.RequestDispense(
-              state.amount_ml, app::ToGroheWaterType(state.water_type));
-          dial_controller_.HandleCommandSent(accepted);
-          result = accepted ? dial_api::RequestResult::kAccepted
-                             : dial_api::RequestResult::kRejectedNotReady;
-          break;
+      if (api_command.kind == ApiCommand::Kind::kStatusQuery) {
+        // M15.1: a plain, same-task read -- DialController::State() is
+        // only safe to call from this task (see its own header comment)
+        // -- posted back through api_status_queue_ rather than
+        // api_result_queue_ (see that member's own comment on app.hpp
+        // for why they're separate). No DialAction, no GroheClient call,
+        // no HandleCommandSent(): a status query never changes state, so
+        // it deliberately skips the switch below entirely -- but must
+        // still fall through to this loop's own rendering/backlight/
+        // vTaskDelay tail below, not `continue` past it (that would
+        // starve the scheduler of this task's own yield point).
+        const dial_state::DialState snapshot = dial_controller_.State();
+        xQueueOverwrite(api_status_queue_, &snapshot);
+      } else {
+        DialAction action = DialAction::kNone;
+        switch (api_command.kind) {
+          case ApiCommand::Kind::kDispense:
+            action = dial_controller_.RequestDispenseAction(api_command.amount_ml,
+                                                             api_command.water_type);
+            break;
+          case ApiCommand::Kind::kStop:
+            action = dial_controller_.RequestStopAction();
+            break;
+          case ApiCommand::Kind::kStatusQuery:
+            break;  // Handled above; unreachable here.
         }
-        case app::DialAction::kRequestStop: {
-          state_changed = true;
-          const bool accepted = grohe_client_.RequestStop();
-          dial_controller_.HandleCommandSent(accepted);
-          result = accepted ? dial_api::RequestResult::kAccepted
-                             : dial_api::RequestResult::kRejectedNotReady;
-          break;
+        dial_api::RequestResult result = dial_api::RequestResult::kRejectedNotAvailable;
+        switch (action) {
+          case app::DialAction::kRequestDispense: {
+            state_changed = true;
+            const auto& state = dial_controller_.State();
+            const bool accepted = grohe_client_.RequestDispense(
+                state.amount_ml, app::ToGroheWaterType(state.water_type));
+            dial_controller_.HandleCommandSent(accepted);
+            result = accepted ? dial_api::RequestResult::kAccepted
+                               : dial_api::RequestResult::kRejectedNotReady;
+            break;
+          }
+          case app::DialAction::kRequestStop: {
+            state_changed = true;
+            const bool accepted = grohe_client_.RequestStop();
+            dial_controller_.HandleCommandSent(accepted);
+            result = accepted ? dial_api::RequestResult::kAccepted
+                               : dial_api::RequestResult::kRejectedNotReady;
+            break;
+          }
+          case app::DialAction::kNone:
+            result = dial_api::RequestResult::kRejectedNotAvailable;
+            break;
         }
-        case app::DialAction::kNone:
-          result = dial_api::RequestResult::kRejectedNotAvailable;
-          break;
+        // Length-1 queue, always overwrite rather than plain send: the
+        // caller (RequestDispense()/RequestStop(), blocked on
+        // xQueueReceive() with a bounded timeout) is the only consumer
+        // and is always waiting by the time this runs, but
+        // xQueueOverwrite() guarantees this post can never itself
+        // block/fail even in an edge case where the caller already gave
+        // up.
+        xQueueOverwrite(api_result_queue_, &result);
       }
-      // Length-1 queue, always overwrite rather than plain send: the
-      // caller (RequestDispense()/RequestStop(), blocked on
-      // xQueueReceive() with a bounded timeout) is the only consumer and
-      // is always waiting by the time this runs, but xQueueOverwrite()
-      // guarantees this post can never itself block/fail even in an
-      // edge case where the caller already gave up.
-      xQueueOverwrite(api_result_queue_, &result);
     }
 
     // Lifecycle events are still just logged here (unchanged since M3.1),
@@ -347,17 +366,61 @@ void App::Run() {
 // on each other directly.
 
 dial_state::DialState App::Status() const {
-  // Plain, unguarded read of state the app task owns/mutates, called
-  // here from the httpd task. Safe enough for the same reason
-  // grohe_ble::BleManager::State() already reads its own state_ this
-  // way: dial_state::DialState is a small POD struct on a single-core
-  // chip, so an aligned field read here is never a torn/corrupted value,
-  // only possibly a "point-in-time snapshot mid-update" if the app task
-  // happens to be preempted between setting two related fields -- a
-  // rare, harmless staleness (the next /api/status poll a moment later
-  // is always consistent again), not a crash or memory-safety issue. Not
-  // worth a mutex for.
-  return dial_controller_.State();
+  // M15.1: cross-task hand-off, mirroring RequestDispense()/RequestStop()
+  // below exactly (same api_command_queue_, same kApiQueueTimeout bound)
+  // -- see api_status_queue_'s own comment on app.hpp for why the result
+  // travels back on its own queue rather than api_result_queue_.
+  //
+  // Replaces a previous direct `return dial_controller_.State();` here,
+  // which called DialController::State() directly from the httpd task.
+  // That looked safe at a glance (dial_state::DialState is a small POD,
+  // single-core chip, no torn *individual* field), but the actual risk
+  // was never a torn field -- it was a torn *combination* of fields: the
+  // app task updates several related fields of the same DialState across
+  // separate statements for one logical transition (e.g.
+  // HandleCommandOutcome()'s dispense_status / active_dispense_amount_ml
+  // / delivered_ml trio, or Tick()'s own multi-field resets), and
+  // FreeRTOS can preempt the app task between any two of those
+  // statements. A reader on another task copying the whole struct in
+  // that window could observe a combination -- dispense_status already
+  // DISPENSING but active_dispense_amount_ml still the *previous*
+  // dispense's amount, say -- that never existed as a real state, not
+  // just a stale-but-coherent one. Routing the read through the app task
+  // too (the same place every write already happens) closes that window
+  // instead of arguing it away.
+  const ApiCommand command{.kind = ApiCommand::Kind::kStatusQuery};
+  if (xQueueSend(api_command_queue_, &command, kApiQueueTimeout) == pdTRUE) {
+    dial_state::DialState snapshot{};
+    if (xQueueReceive(api_status_queue_, &snapshot, kApiQueueTimeout) == pdTRUE) {
+      // Cached for the timeout fallback below -- see last_known_status_'s
+      // own comment on app.hpp. Only ever written here, and only this
+      // one httpd-task entry point ever calls Status() at all
+      // (esp_http_server's single-worker-task model -- see
+      // api_command_queue_'s own comment -- means this is never itself
+      // written from two tasks, or even two overlapping calls, at once).
+      last_known_status_ = snapshot;
+      return snapshot;
+    }
+  }
+  // The bounded round-trip above failed -- the app task's own loop has
+  // stalled far beyond its normal 20ms cadence, the same anomaly
+  // RequestDispense()/RequestStop() already treat as kTimeout (logged by
+  // provisioning_server.cpp's SendRequestResult()). GET /api/status has
+  // no error channel of its own in the documented API contract (see
+  // docs/m15_ha_integration.md) to surface this the same way without
+  // changing that contract, so this falls back to the last snapshot that
+  // *did* complete a full, consistent round-trip -- possibly stale by
+  // now, but still a real state the dial actually was in, unlike a
+  // fabricated default-constructed DialState (which would misrepresent
+  // connection_status/dispense_status as "never detected"), and unlike
+  // falling back to a direct dial_controller_.State() read here (which
+  // would reintroduce the exact torn-read risk this method exists to
+  // close, right in its own error path). See DialController::State()'s
+  // own comment: nothing on the httpd task may call it directly, no
+  // exceptions, including this one.
+  ESP_LOGE(kTag, "Status query timed out waiting for the app task -- "
+           "this should not happen at the normal 20ms loop cadence");
+  return last_known_status_;
 }
 
 settings::DialSettings App::Config() const {

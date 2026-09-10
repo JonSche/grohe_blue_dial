@@ -155,6 +155,25 @@ class DialController {
   // anything actually changed.
   [[nodiscard]] bool HandleTimeStatus(bool available);
 
+  // App-task-only: every mutation of state_ (HandleEvent(), Tick(),
+  // RequestDispenseAction()/RequestStopAction(), HandleCommandSent(),
+  // HandleCommandOutcome(), HandleApplianceState(), HandleTimeStatus(),
+  // HandleConnectionLost()) runs on app::App::Run()'s own task, and
+  // several of them update more than one field of state_ across
+  // separate statements for a single logical transition (e.g.
+  // HandleCommandOutcome()'s dispense_status/active_dispense_amount_ml/
+  // delivered_ml trio). This reference is only ever a fully consistent
+  // view of state_ when read from that same task, right after such a
+  // transition has finished -- a caller on a *different* task copying
+  // the referenced struct could observe a torn, in-between combination
+  // of fields that never existed as a real state, not just a
+  // stale-but-coherent one, if it happens to run while the app task is
+  // mid-transition (FreeRTOS can preempt between any two statements
+  // here). ui::UiManager::Render() is safe because it runs on this same
+  // task, synchronously after each transition completes. Any other task
+  // needing this data (M15's local HTTP API) must not call this
+  // directly -- see app::App::Status()'s own comment for the cross-task
+  // hand-off that makes that safe instead.
   [[nodiscard]] const dial_state::DialState& State() const { return state_; }
 
  private:
