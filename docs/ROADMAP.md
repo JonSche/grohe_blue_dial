@@ -762,14 +762,10 @@ already owns.
       (new), `components/grohe_ble/` (credentials provider + DI), and
       `components/app/` (wiring the two into the composition root) were
       touched -- no BLE protocol, Wi-Fi, OTA, or UI/display files.
-- [ ] **Not yet done from this environment: hardware validation** (that
-      persisted settings actually survive a reboot, and that BLE
-      dispensing still works end to end with the new injected
-      `CredentialsProvider`). No physical hardware reachable here, the
-      same limitation every hardware-dependent milestone before this one
-      has ended on. No test infrastructure exists in this project (an
-      ESP-IDF firmware repo with no host-side harness -- see M12's own
-      precedent) to substitute for it.
+- [x] Verified on hardware: persisted settings survive a reboot, and
+      runtime-provisioned credentials (via M13.2's `/provision`) were
+      successfully stored, picked up by `NvsCredentialsProvider` without
+      a reboot, and used end to end for a real BLE dispense.
 
 ### M13.2 — Local provisioning endpoint ✅
 
@@ -828,16 +824,13 @@ complete security posture).
       confirms `components/ota/` and `scripts/ota.sh` are untouched, and
       no BLE protocol, Wi-Fi, UI, or display file was touched beyond the
       M13.1 seams this milestone reuses.
-- [ ] **Not yet done from this environment: hardware validation**
-      (fail-closed with no secret configured, `401` for a missing/wrong
-      token, `400` for malformed JSON/missing fields, `200` + an actual
-      NVS write for a valid request, and that an invalid request leaves
-      previously-provisioned credentials untouched). No physical
-      hardware or Wi-Fi network reachable here, the same limitation
-      every hardware-dependent milestone before this one has ended on.
-      Prepared `curl` commands for that pass, once real hardware is
-      available (`<token>` is whatever
-      `provisioning_secret_local.hpp` was filled in with):
+- [x] Verified on hardware: the provisioning server is reachable on its
+      own port; an unauthorized request (missing/wrong `X-Provision-Token`)
+      returns `401`; a malformed/incomplete JSON body returns `400`; a
+      valid request returns `200 OK` with `reboot_required: false` and
+      the new credentials are usable immediately, with no reboot, exactly
+      as designed. `curl` commands used for that pass (`<token>` is
+      whatever `provisioning_secret_local.hpp` was filled in with):
 
       ```sh
       # Missing token -> 401
@@ -870,30 +863,29 @@ complete security posture).
         -d '{"user_id":"abc-123","preshared_key_base64":"c29tZWJhc2U2NA=="}'
       ```
 
-### M13.3 — MQTT client & Home Assistant Discovery
+### M13.3 — MQTT client & Home Assistant Discovery (implemented, then removed in M15)
 
-- [ ] MQTT client as `WifiConnection`'s third consumer (never a hard
-      dependency for BLE/dispensing/UI/startup -- degrades exactly like
-      Wi-Fi/OTA already do), reconnect handling, Last Will/availability.
-- [ ] MQTT Discovery for the dial's own state/settings only (firmware
-      version, default amount, encoder step, default water type --
-      settings writable via command topics, persisted through
-      `DialSettingsStore::Set()`). No CO₂/filter/appliance firmware.
+Implemented (MQTT client + HA Discovery for the dial's own settings and
+BLE connection status), hardware-verified working, then **fully removed
+in M15** in favor of a native Home Assistant integration over local HTTP
+-- see [`docs/m15_ha_integration.md`](m15_ha_integration.md). No MQTT
+code remains in the tree; `docs/mqtt_ha_discovery_plan.md` (this
+milestone's own design doc) was deleted alongside it. Kept here only as
+a historical record that this milestone happened and worked before being
+superseded, not as a currently-accurate description of the firmware.
 
-### M13.4 — `grohe_dial` Home Assistant integration
+### M13.4 — `grohe_dial` Home Assistant integration (superseded by M15)
 
-- [ ] Minimal custom integration: config flow (dial IP, provisioning
-      token, an existing `grohe_smarthome` appliance to pair with),
-      Track B credential extraction (the already-working
-      `grohe_smarthome.get_dashboard`/`get_tokens_from_username`
-      services -- no upstream `ha-grohe_smarthome`/`grohe` change
-      required for M13), one-time call to M13.2's `/provision`. No
-      polling coordinator -- MQTT Discovery owns the runtime entities.
+Never implemented as originally scoped (MQTT-Discovery-based, no polling
+coordinator). Superseded by M15's native HTTP-based integration, which
+covers the same goal (a real `grohe_dial` HA integration) with a
+different, non-MQTT transport -- see
+[`docs/m15_ha_integration.md`](m15_ha_integration.md).
 
-### M13.5 — Optional dispense/stop/live-state over MQTT
+### M13.5 — Optional dispense/stop/live-state over MQTT (superseded by M15)
 
-- [ ] Only if M13.1-M13.4 are stable. Secondary by design: the encoder/
-      button already provide this locally.
+Never implemented. Superseded by M15, which covers dispense/stop/live
+state over local HTTP instead of MQTT from the start.
 
 ### M13.6 — Dispense failure feedback (implemented, hardware-verified)
 

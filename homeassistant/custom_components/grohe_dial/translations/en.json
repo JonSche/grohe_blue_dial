@@ -1,0 +1,65 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add Grohe Dial",
+        "description": "Enter the dial's local network address and the API token configured in its own api_secret_local.hpp.",
+        "data": {
+          "host": "Host or IP address",
+          "port": "Port",
+          "api_token": "API token"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate Grohe Dial",
+        "data": {
+          "api_token": "API token"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid API token",
+      "cannot_connect": "Could not reach the dial at that address",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This dial is already configured",
+      "reauth_successful": "Re-authentication successful"
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "ble_connected": { "name": "BLE connection" }
+    },
+    "sensor": {
+      "dispense_status": { "name": "Dispense status" },
+      "connection_status": { "name": "Connection status" },
+      "delivered_ml": { "name": "Delivered amount" }
+    },
+    "select": {
+      "default_water_type": { "name": "Default water type" }
+    },
+    "number": {
+      "default_amount_ml": { "name": "Default amount" },
+      "amount_step_ml": { "name": "Amount step" }
+    },
+    "button": {
+      "dispense": { "name": "Dispense" },
+      "stop": { "name": "Stop" }
+    }
+  },
+  "services": {
+    "dispense": {
+      "name": "Dispense",
+      "description": "Dispense a specific amount and water type.",
+      "fields": {
+        "amount_ml": { "name": "Amount", "description": "Amount to dispense, in millilitres." },
+        "water_type": { "name": "Water type", "description": "Which water type to dispense." }
+      }
+    },
+    "stop": {
+      "name": "Stop",
+      "description": "Stop an in-progress dispense."
+    }
+  }
+}

@@ -7,6 +7,8 @@ dependencies.lock
 .DS_Store
 logs/
 __pycache__/
+homeassistant/.venv-test/
+homeassistant/.pytest_cache/
 *.pyc
 
 # Real Grohe Blue credentials (USER_ID / pre-shared key) -- never committed.
@@ -28,6 +30,11 @@ components/ota/include/ota/ota_secret_local.hpp
 # committed. See
 # components/provisioning/include/provisioning/provisioning_secret_local.hpp.example.
 components/provisioning/include/provisioning/provisioning_secret_local.hpp
+
+# Real local-HTTP-API shared secret/token (M15, gates /api/status,
+# /api/config, /api/dispense, /api/stop) -- never committed. See
+# components/provisioning/include/provisioning/api_secret_local.hpp.example.
+components/provisioning/include/provisioning/api_secret_local.hpp
 
 # Grohe Cloud refresh token (scripts/provision.sh --from-cloud) -- never
 # committed. Written by scripts/grohe_cloud_bootstrap.py (the one-time,

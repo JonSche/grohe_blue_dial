@@ -28,12 +28,28 @@ constexpr TickType_t kPollPeriod = pdMS_TO_TICKS(20);
 // command, no controller reset, no LVGL pause, no framebuffer change).
 // Compile-time only, not a runtime setting, for now.
 constexpr uint32_t kDisplaySleepTimeoutMs = 60000;
+
+// M15: bounded wait for the API command/result queue round-trip (see
+// App::RequestDispense()/RequestStop() and the app_command_queue_ drain
+// in Run()'s loop below). Generous relative to the 20ms loop cadence
+// (kPollPeriod) a response should normally arrive within -- a timeout
+// this large firing would itself be the anomaly worth logging, not a
+// tuning knob for normal operation.
+constexpr TickType_t kApiQueueTimeout = pdMS_TO_TICKS(1000);
 }  // namespace
 
 void App::Run() {
   // TEMPORARY DIAGNOSTIC (whole-system RAM investigation) -- the earliest
   // possible checkpoint, before this function does anything else.
   mem_diag::Log(kTag, "BOOT");
+
+  // M15: created before anything below can possibly start the HTTP
+  // server that would call RequestDispense()/RequestStop() (i.e. before
+  // provisioning_server_.Init(), several steps down) -- see api_command_
+  // queue_/api_result_queue_'s own comment on app.hpp for the full
+  // mechanism these back.
+  api_command_queue_ = xQueueCreate(1, sizeof(ApiCommand));
+  api_result_queue_ = xQueueCreate(1, sizeof(dial_api::RequestResult));
 
   // M12.3: every build should be identifiable from its own boot log alone
   // -- see components/firmware_info/ for where each value actually comes
@@ -148,7 +164,7 @@ void App::Run() {
 
   // TEMPORARY DIAGNOSTIC (whole-system RAM investigation): a one-shot
   // task-stack survey, deliberately delayed past boot (see
-  // kTaskStackSurveyDelayUs below) so Wi-Fi/BLE/MQTT/OTA have all had a
+  // kTaskStackSurveyDelayUs below) so Wi-Fi/BLE/OTA have all had a
   // real chance to create their own tasks first -- a survey run at t=0
   // would only ever find "main". Not gated on any of those actually
   // having succeeded; mem_diag::LogTaskStacks() itself reports each
@@ -188,6 +204,58 @@ void App::Run() {
           break;
       }
     });
+
+    // M15: drain at most one API command per loop tick, on this same app
+    // task -- mirrors the encoder-poll block immediately above exactly
+    // (DialAction -> GroheClient call -> HandleCommandSent()), just
+    // triggered by the httpd task's enqueue (see App::RequestDispense()/
+    // RequestStop() below) instead of a physical button press. Zero
+    // timeout: never blocks this loop waiting for a command that isn't
+    // there yet.
+    ApiCommand api_command;
+    if (xQueueReceive(api_command_queue_, &api_command, 0) == pdTRUE) {
+      DialAction action = DialAction::kNone;
+      switch (api_command.kind) {
+        case ApiCommand::Kind::kDispense:
+          action = dial_controller_.RequestDispenseAction(api_command.amount_ml,
+                                                           api_command.water_type);
+          break;
+        case ApiCommand::Kind::kStop:
+          action = dial_controller_.RequestStopAction();
+          break;
+      }
+      dial_api::RequestResult result = dial_api::RequestResult::kRejectedNotAvailable;
+      switch (action) {
+        case app::DialAction::kRequestDispense: {
+          state_changed = true;
+          const auto& state = dial_controller_.State();
+          const bool accepted = grohe_client_.RequestDispense(
+              state.amount_ml, app::ToGroheWaterType(state.water_type));
+          dial_controller_.HandleCommandSent(accepted);
+          result = accepted ? dial_api::RequestResult::kAccepted
+                             : dial_api::RequestResult::kRejectedNotReady;
+          break;
+        }
+        case app::DialAction::kRequestStop: {
+          state_changed = true;
+          const bool accepted = grohe_client_.RequestStop();
+          dial_controller_.HandleCommandSent(accepted);
+          result = accepted ? dial_api::RequestResult::kAccepted
+                             : dial_api::RequestResult::kRejectedNotReady;
+          break;
+        }
+        case app::DialAction::kNone:
+          result = dial_api::RequestResult::kRejectedNotAvailable;
+          break;
+      }
+      // Length-1 queue, always overwrite rather than plain send: the
+      // caller (RequestDispense()/RequestStop(), blocked on
+      // xQueueReceive() with a bounded timeout) is the only consumer and
+      // is always waiting by the time this runs, but xQueueOverwrite()
+      // guarantees this post can never itself block/fail even in an
+      // edge case where the caller already gave up.
+      xQueueOverwrite(api_result_queue_, &result);
+    }
 
     // Lifecycle events are still just logged here (unchanged since M3.1),
     // except for kConnectionFailed (M8's "disconnect during dispense"
@@ -271,6 +339,76 @@ void App::Run() {
 
     vTaskDelay(kPollPeriod);
   }
+}
+
+// M15: dial_api::DialApiHandler overrides -- see that interface's own
+// comment for the contract, and app.hpp for why this exists as a
+// separate small component rather than App/ProvisioningServer depending
+// on each other directly.
+
+dial_state::DialState App::Status() const {
+  // Plain, unguarded read of state the app task owns/mutates, called
+  // here from the httpd task. Safe enough for the same reason
+  // grohe_ble::BleManager::State() already reads its own state_ this
+  // way: dial_state::DialState is a small POD struct on a single-core
+  // chip, so an aligned field read here is never a torn/corrupted value,
+  // only possibly a "point-in-time snapshot mid-update" if the app task
+  // happens to be preempted between setting two related fields -- a
+  // rare, harmless staleness (the next /api/status poll a moment later
+  // is always consistent again), not a crash or memory-safety issue. Not
+  // worth a mutex for.
+  return dial_controller_.State();
+}
+
+settings::DialSettings App::Config() const {
+  // Unlike Status() above, this one isn't actually cross-task in
+  // practice: dial_controller_.ApplySettings(dial_settings_.Values())
+  // (Run()'s own boot sequence) is the *only* app-task read of
+  // dial_settings_ that ever happens, and it completes before
+  // provisioning_server_.Init() can possibly start the HTTP server that
+  // reaches this method -- every call to Config()/SetConfig() after that
+  // point comes exclusively from the httpd task. No synchronization
+  // needed for a resource only one task ever touches after boot.
+  return dial_settings_.Values();
+}
+
+bool App::SetConfig(const settings::DialSettings& new_values) {
+  // See Config()'s own comment -- dial_settings_ is httpd-task-exclusive
+  // after boot, so this is a plain call, no queue/hand-off needed.
+  // Deliberately does not also call dial_controller_.ApplySettings()
+  // again -- see dial_api::DialApiHandler::SetConfig()'s own comment for
+  // why forcing the dial's live amount/water-type to the new defaults
+  // mid-interaction would be wrong.
+  return dial_settings_.Set(new_values);
+}
+
+dial_api::RequestResult App::RequestDispense(int amount_ml,
+                                             dial_state::WaterType water_type) {
+  const ApiCommand command{.kind = ApiCommand::Kind::kDispense,
+                           .amount_ml = amount_ml,
+                           .water_type = water_type};
+  // Cross-task hand-off -- see api_command_queue_/api_result_queue_'s own
+  // comment on app.hpp, and the drain loop in Run() above for the other
+  // half. Bounded wait, not indefinite: a send or receive that actually
+  // times out here means the app task's own loop has stalled far beyond
+  // its normal 20ms cadence -- a real fault worth surfacing as
+  // dial_api::RequestResult::kTimeout, not something to retry silently.
+  if (xQueueSend(api_command_queue_, &command, kApiQueueTimeout) != pdTRUE) {
+    return dial_api::RequestResult::kTimeout;
+  }
+  dial_api::RequestResult result = dial_api::RequestResult::kTimeout;
+  xQueueReceive(api_result_queue_, &result, kApiQueueTimeout);
+  return result;
+}
+
+dial_api::RequestResult App::RequestStop() {
+  const ApiCommand command{.kind = ApiCommand::Kind::kStop};
+  if (xQueueSend(api_command_queue_, &command, kApiQueueTimeout) != pdTRUE) {
+    return dial_api::RequestResult::kTimeout;
+  }
+  dial_api::RequestResult result = dial_api::RequestResult::kTimeout;
+  xQueueReceive(api_result_queue_, &result, kApiQueueTimeout);
+  return result;
 }
 
 }  // namespace app

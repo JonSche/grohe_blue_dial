@@ -6,15 +6,12 @@
 #include "freertos/task.h"
 
 // TEMPORARY DIAGNOSTIC COMPONENT -- whole-system RAM/fragmentation
-// investigation (see docs/mqtt_ha_discovery_plan.md and the M13.3
-// hardware-investigation history). A single, shared heap-snapshot logger
-// every component in this investigation calls at its own well-defined
+// investigation (M13.3/M14/M15's own hardware-investigation history --
+// see docs/ROADMAP.md). A single, shared heap-snapshot logger every
+// component in this investigation calls at its own well-defined
 // state-transition points, so the entire boot's heap history ends up in
 // one consistently-formatted log stream instead of N slightly different
-// ad-hoc formats (mirrors, and is meant to sit alongside, not replace,
-// mqtt_client.cpp's own existing LogHeapDiag()/[DIAG:A/B/C] and
-// ha_discovery.cpp's [DIAG:SERIALIZE] -- neither of those is touched by
-// this component).
+// ad-hoc formats.
 //
 // Deliberately header-only: no .cpp, no linked library -- every call site
 // already depends on `log` (uses ESP_LOG* itself already) and
@@ -63,15 +60,14 @@ inline void Log(const char* tag, const char* label) {
 // for a task it can't find -- logs "not found" instead, so a missing
 // task is visible as missing, not silently absent from the output.
 //
-// Names verified against the actual ESP-IDF/esp-mqtt/NimBLE source this
-// build uses (not assumed): "main" (components/freertos/app_startup.c),
-// "mqtt_task" (esp-mqtt's own mqtt_client.c, unconditional), "httpd"
-// (esp_http_server's own httpd_main.c, unconditional -- note this name
-// is NOT unique: both ota::OtaServer's and provisioning::
+// Names verified against the actual ESP-IDF/NimBLE source this build
+// uses (not assumed): "main" (components/freertos/app_startup.c),
+// "httpd" (esp_http_server's own httpd_main.c, unconditional -- note
+// this name is NOT unique: both ota::OtaServer's and provisioning::
 // ProvisioningServer's httpd instances use the identical task name, so
-// if both were ever running simultaneously this lookup could not tell
-// them apart; today only OTA's actually starts, since Provisioning's own
-// httpd_start() fails before creating its task), "nimble_host"
+// this lookup cannot tell them apart when both are running at once, as
+// they are since M14's RAM headroom let Provisioning's own httpd_start()
+// start succeeding too -- see docs/ROADMAP.md's M14 section), "nimble_host"
 // (nimble_port_freertos.c, unconditional), "tiT" (lwIP's own
 // TCPIP_THREAD_NAME, components/lwip/port/include/lwipopts.h). "wifi" is
 // included as a well-known ESP-IDF convention but was NOT independently
@@ -80,7 +76,7 @@ inline void Log(const char* tag, const char* label) {
 // documented, not a bug.
 inline void LogTaskStacks(const char* tag) {
   static constexpr const char* kCandidates[] = {
-      "main", "mqtt_task", "httpd", "nimble_host", "tiT", "wifi",
+      "main", "httpd", "nimble_host", "tiT", "wifi",
   };
   for (const char* name : kCandidates) {
     const TaskHandle_t handle = xTaskGetHandle(name);

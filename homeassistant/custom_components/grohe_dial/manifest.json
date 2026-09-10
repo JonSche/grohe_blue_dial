@@ -1,0 +1,11 @@
+{
+  "domain": "grohe_dial",
+  "name": "Grohe Dial",
+  "codeowners": [],
+  "config_flow": true,
+  "documentation": "https://github.com/jonasscherer/grohe_blue_dial/blob/main/docs/m15_ha_integration.md",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/jonasscherer/grohe_blue_dial/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

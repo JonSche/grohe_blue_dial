@@ -1,0 +1,28 @@
+dispense:
+  target:
+    entity:
+      integration: grohe_dial
+  fields:
+    amount_ml:
+      required: true
+      example: 500
+      selector:
+        number:
+          min: 100
+          max: 2000
+          step: 10
+          unit_of_measurement: ml
+    water_type:
+      required: true
+      example: sparkling
+      selector:
+        select:
+          options:
+            - still
+            - medium
+            - sparkling
+
+stop:
+  target:
+    entity:
+      integration: grohe_dial

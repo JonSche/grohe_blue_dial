@@ -138,6 +138,50 @@ DialAction DialController::HandleEvent(encoder::EncoderEvent event) {
   return DialAction::kNone;
 }
 
+DialAction DialController::RequestDispenseAction(
+    int amount_ml, dial_state::WaterType water_type) {
+  // Mirrors HandleEvent()'s kShortPress-while-command_pending_ debounce
+  // exactly.
+  if (command_pending_) {
+    return DialAction::kNone;
+  }
+  // Mirrors HandleEvent()'s kShortPress-while-kIdle case exactly, minus
+  // the other DispenseStatus arms HandleEvent() also has to enumerate --
+  // a dispense request only ever makes sense from kIdle, the same rule
+  // that switch already encodes.
+  if (state_.dispense_status != dial_state::DispenseStatus::kIdle) {
+    return DialAction::kNone;
+  }
+  // Set into state_ first -- see this method's own header comment for
+  // why (one single source of truth for the UI, no shadow state).
+  // Already validated by the HTTP layer before this is ever called; no
+  // second clamp here duplicates that contract.
+  state_.amount_ml = amount_ml;
+  state_.water_type = water_type;
+  ESP_LOGI(kTag, "Dispense requested via API: %d ml", amount_ml);
+  pending_dispense_amount_ml_ = amount_ml;
+  return DialAction::kRequestDispense;
+}
+
+DialAction DialController::RequestStopAction() {
+  // Mirrors HandleEvent()'s kShortPress-while-command_pending_ debounce
+  // exactly.
+  if (command_pending_) {
+    return DialAction::kNone;
+  }
+  // Mirrors HandleEvent()'s kShortPress-while-kDispensing case exactly,
+  // including the same optimistic kStopping transition (frozen UI spec,
+  // "Stop and Finished") -- HandleCommandSent()/HandleCommandOutcome()
+  // revert it exactly as they already do for the encoder-triggered path
+  // if the request is rejected or fails to send.
+  if (state_.dispense_status != dial_state::DispenseStatus::kDispensing) {
+    return DialAction::kNone;
+  }
+  ESP_LOGI(kTag, "Stop requested via API");
+  state_.dispense_status = dial_state::DispenseStatus::kStopping;
+  return DialAction::kRequestStop;
+}
+
 void DialController::HandleCommandSent(bool accepted) {
   command_pending_ = accepted;
   if (!accepted &&

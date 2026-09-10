@@ -1,12 +1,15 @@
 #pragma once
 
 #include "app/dial_controller.hpp"
+#include "dial_api/dial_api.hpp"
 #include "display/gc9a01_display.hpp"
 #include "encoder/encoder_input.hpp"
+#include "freertos/queue.h"
 #include "grohe_ble/grohe_client.hpp"
 #include "grohe_ble/grohe_credentials.hpp"
 #include "ota/ota_secret.hpp"
 #include "ota/ota_server.hpp"
+#include "provisioning/api_secret.hpp"
 #include "provisioning/provisioning_secret.hpp"
 #include "provisioning/provisioning_server.hpp"
 #include "settings/dial_settings.hpp"
@@ -37,12 +40,33 @@ namespace app {
 // resulting CommandOutcome back into DialController -- DialController
 // itself never touches GroheClient directly, matching how it has never
 // touched BleManager directly either.
-class App {
+//
+// M15: App also implements dial_api::DialApiHandler -- the seam
+// components/provisioning/'s new local HTTP API calls through, injected
+// into provisioning_server_'s constructor as `*this` below. See
+// dial_api.hpp's own comment for why this interface exists as its own
+// component rather than App and ProvisioningServer depending on each
+// other directly (a circular CMake dependency), and app.cpp for the
+// cross-task hand-off Status()/RequestDispense()/RequestStop() actually
+// need (the httpd task calls these; only App::Run()'s own app task may
+// touch dial_controller_/grohe_client_).
+class App : public dial_api::DialApiHandler {
  public:
   App() = default;
 
   // Brings up all subsystems and runs the application loop. Never returns.
   [[noreturn]] void Run();
+
+  // dial_api::DialApiHandler overrides -- see that interface's own
+  // comment for the contract each must satisfy. Safe to call from any
+  // task, including the httpd task provisioning_server_'s handlers run
+  // on -- see app.cpp for exactly how each stays safe.
+  [[nodiscard]] dial_state::DialState Status() const override;
+  [[nodiscard]] settings::DialSettings Config() const override;
+  [[nodiscard]] bool SetConfig(const settings::DialSettings& new_values) override;
+  [[nodiscard]] dial_api::RequestResult RequestDispense(
+      int amount_ml, dial_state::WaterType water_type) override;
+  [[nodiscard]] dial_api::RequestResult RequestStop() override;
 
  private:
   display::Gc9a01Display display_;
@@ -100,11 +124,41 @@ class App {
   // deliberately separate esp_http_server instance/port from it too
   // (components/ota/ itself is untouched by this milestone).
   provisioning::LocalProvisioningSecretProvider provisioning_secret_provider_;
+
+  // M15: the local HTTP API's own token (X-Api-Token) -- deliberately
+  // separate from provisioning_secret_provider_ above: that one's scope
+  // is "can overwrite this dial's stored Grohe credentials" (inert until
+  // the next command); this one's is "can make the physical appliance
+  // dispense water right now" -- a materially more immediate
+  // consequence, worth rotating/scoping independently. See
+  // api_secret.hpp and docs/m15_ha_integration.md's security section.
+  provisioning::LocalApiSecretProvider api_secret_provider_;
+
   provisioning::ProvisioningServer provisioning_server_{
       wifi_connection_, provisioning_secret_provider_,
-      grohe_credentials_provider_};
+      grohe_credentials_provider_, api_secret_provider_, *this};
 
   grohe_ble::GroheClient grohe_client_{wifi_connection_, grohe_credentials_provider_};
+
+  // M15: cross-task hand-off for RequestDispense()/RequestStop(), called
+  // from the httpd task -- mirrors grohe_ble::BleManager::command_queue_
+  // exactly: a bounded queue the calling task pushes onto, drained once
+  // per App::Run() loop tick (the same task that already owns
+  // dial_controller_/grohe_client_, right where the encoder-poll
+  // callback already lives), with a second queue carrying the result
+  // back to the caller, which blocks on it with a bounded timeout. Depth
+  // 1 each: esp_http_server's own default config processes one request
+  // at a time on a single worker task, so only one command can ever be
+  // in flight through this path at once. Created in Run(), before
+  // provisioning_server_.Init() can possibly start receiving requests --
+  // see app.cpp.
+  struct ApiCommand {
+    enum class Kind { kDispense, kStop } kind;
+    int amount_ml = 0;
+    dial_state::WaterType water_type = dial_state::WaterType::kStill;
+  };
+  QueueHandle_t api_command_queue_ = nullptr;
+  QueueHandle_t api_result_queue_ = nullptr;
 };
 
 }  // namespace app

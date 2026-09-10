@@ -643,11 +643,12 @@ report what it's now running.
 ## Provisioning (M13.2)
 
 A second local-network HTTP endpoint, `POST /provision`, lets Home
-Assistant (M13.4, not yet built) push this dial's Grohe BLE credentials
-once, rather than the ESP32 ever implementing a second Grohe Cloud
-login itself -- see the M13 architecture proposal (project history) for
-the full "why HTTP for provisioning, MQTT for everything else"
-reasoning. Deliberately reuses OTA's transport/security *shape*
+Assistant push this dial's Grohe BLE credentials once, rather than the
+ESP32 ever implementing a second Grohe Cloud login itself. As of M15,
+this is also where the dial's local HTTP API for the native Home
+Assistant integration lives -- see
+[`docs/m15_ha_integration.md`](m15_ha_integration.md) -- rather than a
+third `esp_http_server` instance. Deliberately reuses OTA's transport/security *shape*
 (`esp_http_server`, plain HTTP, shared-secret header, constant-time
 compare, fail-closed on an empty secret) without touching
 `components/ota/` itself at all, and without reusing its secret.
@@ -822,99 +823,18 @@ model/*.java`). `grohe_cloud_refresh.py` walks that tree for the one
 appliance carrying a `presharedkey` field, and refuses to guess (a clear
 error, not a silent pick) if none or more than one is found.
 
-## MQTT / Home Assistant Discovery (M13.3)
+## MQTT / Home Assistant Discovery (M13.3, removed in M15)
 
-Full design in [`docs/mqtt_ha_discovery_plan.md`](mqtt_ha_discovery_plan.md)
-(topic schema, discovery entity list, payload examples, every open
-decision this milestone resolved). This section is the short version.
-
-**Scope**: the dial's own settings (read/write) and BLE connection status
-(read-only) only -- `mqtt::MqttClient` (`components/dial_mqtt/`). No
-dispense/stop control, no live dispense state -- both explicitly deferred
-to M13.5 (see `docs/ROADMAP.md`'s M13 section). No `grohe_ble`, no
-`app::DialController`, no `grohe_smarthome`/Grohe Cloud dependency of any
-kind -- `MqttClient` only ever reads `dial_state::DialState` by value
-(mirroring `ui::UiManager::Render()`'s own read-only relationship to it)
-and reads/writes `settings::DialSettingsStore` directly (mirroring
-`provisioning::ProvisioningServer`'s own relationship to
-`grohe_ble::NvsCredentialsProvider`).
-
-**Transport**: a third permanent `time_service::WifiConnection` consumer,
-alongside `ota::OtaServer` and `provisioning::ProvisioningServer` -- same
-non-blocking `AcquireAsync()`/never-`Release()`d shape. Plain `mqtt://`,
-never `mqtts://`: `esp-mqtt`'s TLS transport goes through the identical
-esp-tls/mbedTLS stack that failed on this exact chip during M12.4's
-reverted HTTPS OTA attempt (`MBEDTLS_ERR_SSL_ALLOC_FAILED`, heap
-fragmentation, no PSRAM -- see "OTA (M12)" above). `CONFIG_MQTT_TRANSPORT_
-SSL=n` in `sdkconfig.defaults` removes that code path from the build
-entirely, not just leaves it unused.
-
-**Broker config**: `mqtt::MqttConfigProvider` (broker URI, username,
-password), gitignored `mqtt_config_local.hpp` -- same local-header
-pattern as every other secret in this project. Empty broker URI means
-"MQTT disabled", never "connect unauthenticated" -- same convention as
-OTA's/Provisioning's own secrets.
-
-**Topic schema** (`components/dial_mqtt/ha_discovery.{hpp,cpp}`): everything
-under `grohe_dial/<mac>/`, where `<mac>` is the lowercase-hex STA MAC (no
-active Wi-Fi connection required to read it -- `esp_read_mac()` reads
-straight from eFuse), also used as the MQTT `client_id` and Home
-Assistant's discovery `node_id`. `settings/<name>/state` (retained) +
-`settings/<name>/set` (subscribed) for the three writable settings;
-`state/connection_status` (retained, read-only) for BLE connection
-status; `availability` for Last Will/Availability (see below). Home
-Assistant MQTT Discovery configs live under `homeassistant/<component>/
-grohe_dial_<mac>/<object_id>/config` (HA's own default discovery prefix,
-hardcoded).
-
-**Entities**: `number.default_amount_ml`, `number.amount_step_ml`,
-`select.default_water_type` (all read/write, `entity_category: config`),
-`sensor.connection_status` (read-only, `entity_category: diagnostic`).
-`default_amount_ml`'s discovery `step` field tracks the *live*
-`amount_step_ml` setting -- `MqttClient` republishes that one discovery
-config whenever `amount_step_ml` itself changes via its own command
-topic, keeping Home Assistant's own control in sync; `amount_step_ml`'s
-own entity uses a fixed, independent 10 ml UI step (coupling it to
-itself would be circular). No dedicated firmware-version entity --
-`firmware_info::Version()`/`GitCommit()` are embedded as every entity's
-shared `device.sw_version` field instead, refreshed on every (re)connect.
-
-**Availability / Last Will**: `grohe_dial/<mac>/availability`, retained,
-referenced as every entity's `availability_topic`. Registered as the MQTT
-session's Last Will (`msg="offline"`, `retain=1`) at client configuration
-time; `MqttClient` explicitly publishes `"online"` on every
-`MQTT_EVENT_CONNECTED` (first connect and every reconnect alike). This
-firmware has no graceful-shutdown path (`App::Run()` never returns), so
-`"offline"` is only ever published by the broker itself, on an
-ungraceful drop -- the normal, expected use of LWT. A clean MQTT session
-(the default) is used deliberately, paired with unconditionally
-republishing every discovery config and settings state topic on every
-connect -- the only reconnect-state logic this component needs.
-
-**Reconnect**: `esp-mqtt`'s own built-in auto-reconnect (~10 s backoff,
-`network.disable_auto_reconnect` left `false`) -- no custom reconnect
-loop, matching this project's "reuse the library's own mechanism"
-instinct elsewhere (`esp_ota_*` used directly, no custom OTA protocol).
-Keepalive is 30 s (not `esp-mqtt`'s own 120 s default), so a real drop is
-reflected in Home Assistant within roughly one keepalive window, not up
-to ~3 minutes. **The physical dial itself never reacts to MQTT's own
-connection state in any way, in either direction** -- no UI element, no
-behavior change -- matching this project's own "Home Assistant extends
-the product; it never becomes a runtime dependency of it" principle
-literally: a broker outage must be invisible to someone standing at the
-dial.
-
-**Security**: broker username/password (`esp_mqtt_client_config_t`'s own
-`credentials.username`/`credentials.authentication.password`) instead of
-an app-level shared-secret header -- MQTT has no such concept; this is
-the equivalent, authenticated at the layer MQTT actually authenticates
-at. Same threat model as OTA/Provisioning: protects against accidental/
-opportunistic access on an assumed-trusted local LAN, not against an
-attacker who can already sniff that LAN's traffic. Blast radius is
-deliberately small by construction: the only thing a command topic can
-ever reach is `DialSettingsStore::Set()` -- a compromised/misconfigured
-broker can change this dial's default pour amount, never dispense water,
-never touch BLE credentials or HMAC keys. See `SECURITY.md`.
+Implemented in M13.3: `mqtt::MqttClient` (`components/dial_mqtt/`)
+published the dial's own settings and BLE connection status via MQTT +
+Home Assistant MQTT Discovery. **Removed in M15**, replaced by a native
+Home Assistant integration talking to the dial over local HTTP -- see
+[`docs/m15_ha_integration.md`](m15_ha_integration.md) for the current
+architecture, API, and the reasoning behind the replacement (native
+Config Entries/entities instead of MQTT Discovery's generic
+auto-configuration, no broker dependency, real RAM/flash savings --
+measured, not estimated, in that document). Kept here as a historical
+pointer only; no MQTT code remains in the tree.
 
 ## Dispense UI (M11)
 

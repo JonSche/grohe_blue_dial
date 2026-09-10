@@ -66,6 +66,25 @@ class DialController {
   // ApplySettings() above).
   [[nodiscard]] DialAction HandleEvent(encoder::EncoderEvent event);
 
+  // M15: additive entry points for a non-encoder trigger (the local
+  // HTTP API, components/provisioning/'s new /api/dispense and
+  // /api/stop) -- exactly the same debounce/state-machine rules as
+  // HandleEvent()'s kShortPress cases (command_pending_ check,
+  // dispense_status gate, the same pending_dispense_amount_ml_
+  // snapshot/kStopping transition), just parameterized by an explicit
+  // amount/water_type instead of reading live encoder-driven state_.
+  // amount_ml/water_type are set into state_ first (so the physical
+  // dial's own screen reflects an HTTP-triggered dispense exactly as if
+  // the encoder had been turned to it -- one single source of truth, no
+  // shadow state) -- see dial_controller.cpp for the exact mirroring.
+  // Returns kNone for exactly the same reasons HandleEvent() would have
+  // returned kNone in the equivalent encoder scenario -- the caller
+  // (App, see dial_api::DialApiHandler) maps that to the specific
+  // dial_api::RequestResult reason.
+  [[nodiscard]] DialAction RequestDispenseAction(int amount_ml,
+                                                 dial_state::WaterType water_type);
+  [[nodiscard]] DialAction RequestStopAction();
+
   // Called by App right after it attempts to actually send the command
   // HandleEvent() requested; `accepted` is whatever
   // GroheClient::RequestDispense()/RequestStop() returned. Marks a command
