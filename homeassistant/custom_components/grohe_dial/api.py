@@ -17,7 +17,7 @@ from typing import Any
 
 import aiohttp
 
-from .const import API_TOKEN_HEADER
+from .const import API_TOKEN_HEADER, PROVISION_TOKEN_HEADER
 
 __all__ = [
     "GroheDialApiClient",
@@ -27,6 +27,7 @@ __all__ = [
     "GroheDialCommandRejected",
     "DialStatus",
     "DialConfig",
+    "provision_dial",
 ]
 
 
@@ -206,3 +207,45 @@ class GroheDialApiClient:
         status_code, body = await self._request("POST", "/api/stop")
         if status_code != 200:
             raise GroheDialCommandRejected(body.get("reason", "unknown"), status_code)
+
+
+async def provision_dial(
+    session: aiohttp.ClientSession,
+    host: str,
+    port: int,
+    provision_token: str,
+    user_id: str,
+    preshared_key_base64: str,
+) -> None:
+    """M16: one-shot call to the dial's existing POST /provision endpoint
+    (components/provisioning/provisioning_server.cpp, M13.2 -- unchanged
+    by M16, no firmware code needed for provisioning at all) -- mirrors
+    scripts/provision.sh's own request exactly. A bare function, not a
+    GroheDialApiClient method: that class is permanently bound to one
+    api_token/X-Api-Token pair for the /api/* endpoints; /provision uses
+    a completely separate secret (X-Provision-Token, PROVISION_TOKEN_HEADER)
+    for a one-shot call, not a fit for that class's own persistent-session
+    shape.
+
+    Unlike every GroheDialApiClient method above, /provision's *error*
+    responses are plain text (httpd_resp_send_err()'s own default body) --
+    only its success response is JSON ({"status":"ok",...}). Does not
+    share _request()'s "every response is JSON" assumption for that
+    reason.
+    """
+    url = f"http://{host}:{port}/provision"
+    headers = {PROVISION_TOKEN_HEADER: provision_token}
+    body = {"user_id": user_id, "preshared_key_base64": preshared_key_base64}
+    try:
+        async with session.post(
+            url, headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=15)
+        ) as response:
+            if response.status == 401:
+                raise GroheDialAuthError("POST /provision: invalid provisioning token")
+            if response.status != 200:
+                text = (await response.text()).strip()
+                raise GroheDialCommandRejected(text or "unknown", response.status)
+    except aiohttp.ClientError as err:
+        raise GroheDialConnectionError(f"POST /provision: {err}") from err
+    except TimeoutError as err:
+        raise GroheDialConnectionError("POST /provision: timed out") from err

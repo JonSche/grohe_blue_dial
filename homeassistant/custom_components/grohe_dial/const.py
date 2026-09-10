@@ -21,6 +21,12 @@ DEFAULT_SCAN_INTERVAL_SECONDS = 10
 # provisioning_server.cpp's kApiAuthHeader.
 API_TOKEN_HEADER = "X-Api-Token"
 
+# M16: HTTP header POST /provision requires -- see provisioning_server.cpp's
+# kProvisionAuthHeader. A separate secret from API_TOKEN_HEADER above (that
+# one gates /api/*, this one gates /provision) -- unchanged, pre-existing
+# firmware behavior (M13.2), not new in M16.
+PROVISION_TOKEN_HEADER = "X-Provision-Token"
+
 # dial_state::WaterType's own three values (dial_state.hpp) -- the
 # firmware rejects anything else with 422. Order matches the physical
 # dial's own long-press cycle (Still -> Medium -> Sparkling -> Still).

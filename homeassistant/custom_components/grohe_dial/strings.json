@@ -27,6 +27,46 @@
       "reauth_successful": "Re-authentication successful"
     }
   },
+  "options": {
+    "step": {
+      "cloud_login": {
+        "title": "Grohe Cloud login",
+        "description": "Sign in with your Grohe account to fetch this dial's Grohe Blue Home BLE credentials. Your password is used once, for this login only -- it is never stored.",
+        "data": {
+          "email": "Grohe account email",
+          "password": "Grohe account password"
+        }
+      },
+      "select_appliance": {
+        "title": "Select your Grohe Blue Home",
+        "description": "Multiple Grohe appliances were found in this account -- choose the one this dial should connect to.",
+        "data": {
+          "appliance": "Appliance"
+        }
+      },
+      "provision_token": {
+        "title": "Dial provisioning token",
+        "description": "Enter this dial's own provisioning token (separate from its API token -- see provisioning_secret_local.hpp on the device).",
+        "data": {
+          "provision_token": "Provisioning token"
+        }
+      }
+    },
+    "error": {
+      "invalid_cloud_auth": "Invalid Grohe account email or password",
+      "cloud_unavailable": "Could not reach the Grohe Cloud",
+      "invalid_provision_token": "Invalid provisioning token",
+      "dial_unreachable": "Could not reach the dial",
+      "provisioning_failed": "The dial rejected the provisioning request",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "invalid_cloud_auth": "Invalid Grohe account email or password",
+      "cloud_unavailable": "Could not reach the Grohe Cloud",
+      "no_appliances_found": "No Grohe Blue Home found in this Grohe account",
+      "unknown": "Unexpected error"
+    }
+  },
   "entity": {
     "binary_sensor": {
       "ble_connected": { "name": "BLE connection" }
