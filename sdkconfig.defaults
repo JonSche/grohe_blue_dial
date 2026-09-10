@@ -172,3 +172,17 @@ CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_ENCRYPTION=n
 # dial" guarantee. See CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE's own Kconfig
 # help text.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# M16.3: the Task Watchdog Timer (TWDT) itself is already ESP-IDF's own
+# default (CONFIG_ESP_TASK_WDT_EN/_INIT=y, 5s timeout, monitoring only
+# the idle task out of the box) -- what's missing by default is
+# CONFIG_ESP_TASK_WDT_PANIC, without which a trip only logs a warning
+# and otherwise does nothing. app.cpp now also registers its own main
+# task (App::Run()'s loop, fed once per ~20ms iteration -- see its own
+# comment) with the TWDT; PANIC is what turns "app task stopped
+# responding" into an actual reset instead of a warning nobody's
+# watching. Interacts correctly with the OTA rollback guarantee above: a
+# hang before ota::ConfirmBootValid() leaves the image unconfirmed, so
+# the reset this triggers correctly rolls back too, not just reboots
+# into the same bad image.
+CONFIG_ESP_TASK_WDT_PANIC=y

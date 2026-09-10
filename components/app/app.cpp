@@ -1,6 +1,7 @@
 #include "app/app.hpp"
 
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "firmware_info/firmware_info.hpp"
 #include "freertos/FreeRTOS.h"
@@ -150,6 +151,37 @@ void App::Run() {
   // outside a pending-verify boot (i.e. every normal boot).
   ota::ConfirmBootValid();
 
+  // M16.3: registers this task (the one running Run()'s own loop below
+  // -- ESP-IDF's "main" task, per app_main()'s own single call site)
+  // with the Task Watchdog Timer (TWDT) -- nullptr means "the calling
+  // task". Deliberately placed *here*, after boot/init has already
+  // finished, not at the top of Run(): the init sequence above has its
+  // own several-second, legitimately variable-length waits (Wi-Fi
+  // association, BLE controller bring-up, ...) that were never
+  // instrumented with their own reset calls -- registering earlier
+  // without also touching every one of those steps would risk a false
+  // trip on a slow-but-healthy boot, precisely the regression this
+  // milestone's own requirement ("Normalbetrieb darf nicht
+  // beeinträchtigt werden") warns against. This covers the steady-state
+  // loop specifically -- the failure mode actually being hardened
+  // against (a future bug hanging the app task during normal
+  // operation), not the boot sequence, which already has the
+  // bootloader's own OTA-rollback safety net (ConfirmBootValid() above)
+  // for a crash, just not yet for a hang with no reset at all -- a
+  // separate, larger undertaking, not in scope here.
+  //
+  // kApiQueueTimeout (1s, app.cpp's own anonymous-namespace constant)
+  // is NOT a concern here: that bounded wait belongs to the *httpd*
+  // task (inside RequestDispense()/RequestStop()/Status(), all called
+  // *from* the httpd task, never run on this one) -- this task's own
+  // loop never blocks anywhere near CONFIG_ESP_TASK_WDT_TIMEOUT_S (5s,
+  // see sdkconfig.defaults's own comment), only the ordinary 20ms
+  // vTaskDelay(kPollPeriod) at the bottom of every iteration.
+  if (const esp_err_t err = esp_task_wdt_add(nullptr); err != ESP_OK) {
+    ESP_LOGE(kTag, "esp_task_wdt_add failed: %s -- app task hangs will "
+             "no longer trigger an automatic reset", esp_err_to_name(err));
+  }
+
   ESP_LOGI(kTag, "Startup complete");
 
   // Display sleep (backlight only -- see kDisplaySleepTimeoutMs's own
@@ -175,6 +207,14 @@ void App::Run() {
   const int64_t boot_time_us = esp_timer_get_time();
 
   for (;;) {
+    // M16.3: fed unconditionally, first thing every iteration -- as
+    // long as this loop keeps cycling at its normal ~20ms cadence
+    // (kPollPeriod), this never comes remotely close to the 5s TWDT
+    // timeout. A future bug that genuinely hangs this task (blocks
+    // without ever reaching the next iteration) stops feeding it and
+    // triggers a panic-reset instead of hanging forever unnoticed.
+    esp_task_wdt_reset();
+
     if (!logged_task_stacks &&
         esp_timer_get_time() - boot_time_us >= kTaskStackSurveyDelayUs) {
       logged_task_stacks = true;
