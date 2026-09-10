@@ -44,8 +44,18 @@ type GroheDialConfigEntry = ConfigEntry[GroheDialCoordinator]
 
 async def async_setup_entry(hass: HomeAssistant, entry: GroheDialConfigEntry) -> bool:
     session = async_get_clientsession(hass)
+    # int(...): defensive re-cast, not just belt-and-braces -- entry.data
+    # is whatever config_flow.py's DATA_SCHEMA last stored, and
+    # selector.NumberSelector always yields a float regardless of what
+    # was typed. config_flow.py itself now normalizes to int before ever
+    # persisting (see its own comment), but this also self-heals any
+    # config entry that was already created before that fix -- without
+    # this, entry.data[CONF_PORT] being e.g. 8080.0 would build the
+    # client's base URL as "http://<host>:8080.0", a real hardware
+    # acceptance-test failure this fixes (GET /api/status failing
+    # forever via ConfigEntryNotReady, never actually reaching the dial).
     client = GroheDialApiClient(
-        session, entry.data[CONF_HOST], entry.data[CONF_PORT], entry.data[CONF_API_TOKEN]
+        session, entry.data[CONF_HOST], int(entry.data[CONF_PORT]), entry.data[CONF_API_TOKEN]
     )
 
     coordinator = GroheDialCoordinator(hass, client)

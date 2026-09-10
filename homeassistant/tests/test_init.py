@@ -82,3 +82,42 @@ async def test_setup_creates_device_and_entities(hass: HomeAssistant, enable_cus
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
     assert entry.state.value == "not_loaded"
+
+
+async def test_setup_self_heals_a_legacy_float_port(hass: HomeAssistant, enable_custom_integrations) -> None:
+    """Regression test for a real bug found on real hardware: a config
+    entry created before config_flow.py's own fix could have port
+    persisted as a float (e.g. 8080.0, exactly what
+    selector.NumberSelector yields) -- __init__.py's defensive
+    int(entry.data[CONF_PORT]) must still build a correct, connectable
+    client for an entry that already exists in that broken state,
+    without requiring the user to delete and re-add the integration.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="192.168.1.51",
+        data={"host": "192.168.1.51", "port": 8080.0, CONF_API_TOKEN: "sometoken"},
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "custom_components.grohe_dial.api.GroheDialApiClient.get_status",
+            new=AsyncMock(return_value=_STATUS),
+        ),
+        patch(
+            "custom_components.grohe_dial.api.GroheDialApiClient.get_config",
+            new=AsyncMock(return_value=type("C", (), _CONFIG)()),
+        ),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state.value == "loaded"
+    # The actual bug: a stray ".0" in the client's own base URL, silently
+    # breaking every subsequent request against a real dial.
+    base_url = entry.runtime_data.client._base_url
+    assert base_url == "http://192.168.1.51:8080", base_url
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()

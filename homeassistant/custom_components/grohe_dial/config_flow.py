@@ -57,6 +57,19 @@ class GroheDialConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            # selector.NumberSelector always yields a float, regardless
+            # of what was typed -- normalized to int here, before
+            # anything persists it, not just for _async_validate()'s own
+            # call below. A previous version only cast locally inside
+            # _async_validate(), which validated successfully and then
+            # went on to store the *original* float via
+            # async_create_entry(data=user_input) further down -- a real
+            # bug found on real hardware: the client's base URL ended up
+            # as "http://<host>:8080.0", a connection failure that
+            # retried forever since the stored value never changed. See
+            # __init__.py's own defensive re-cast for entries already
+            # created before this fix.
+            user_input[CONF_PORT] = int(user_input[CONF_PORT])
             error = await self._async_validate(user_input)
             if error is None:
                 # The dial's own stable Wi-Fi-MAC-based device ID isn't
@@ -84,6 +97,10 @@ class GroheDialConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             merged = {**reauth_entry.data, CONF_API_TOKEN: user_input[CONF_API_TOKEN]}
+            # Same normalization as async_step_user() above -- reauth_entry.data
+            # may itself still carry a float port from an entry created
+            # before this fix; this also self-heals it going forward.
+            merged[CONF_PORT] = int(merged[CONF_PORT])
             error = await self._async_validate(merged)
             if error is None:
                 return self.async_update_reload_and_abort(reauth_entry, data=merged)
