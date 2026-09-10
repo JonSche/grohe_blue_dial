@@ -1052,6 +1052,81 @@ for the full reasoning, measured numbers, and evidence behind each one.
       routing were tested. Lower confidence than every other result in
       this milestone.
 
+### M15 — Native Home Assistant Integration (Local HTTP, MQTT Removed) ✅
+
+Replaces M13.3/M13.4/M13.5's MQTT-based approach entirely (see those
+sections' own "superseded by M15" notes above) with a local HTTP API on
+the dial plus a real, native Home Assistant custom integration -- no
+MQTT, no cloud dependency. Full detail, evidence, and the exact test/RAM
+numbers live in
+[`docs/m15_ha_integration.md`](m15_ha_integration.md); this entry is
+the roadmap-level summary.
+
+```
+Home Assistant -> Grohe Dial HA Integration -> local HTTP -> Grohe Dial -> BLE -> Grohe Blue Home
+```
+
+- [x] **MQTT removed in full**: `components/dial_mqtt/` deleted, every
+      reference cleaned up repo-wide (verified by grep -- only
+      historical/dated commentary remains).
+- [x] **Local HTTP API** on the existing Provisioning httpd instance
+      (port 8080, no new task): `GET /api/status`, `GET`/`POST
+      /api/config`, `POST /api/dispense`, `POST /api/stop`, all gated by
+      a dedicated `X-Api-Token` (separate from the provisioning/OTA
+      tokens). Reuses the encoder's own dispense/stop call chain
+      unmodified via a cross-task queue hand-off
+      (`components/dial_api/`), the same pattern `BleManager`'s own
+      command queue already established.
+- [x] **Native Home Assistant custom integration**
+      (`homeassistant/custom_components/grohe_dial/`) -- a real Config
+      Entry (host/port/API token, local-only, no cloud login), device +
+      9 entities across 5 platforms, two services
+      (`grohe_dial.dispense`/`grohe_dial.stop`). Cloud login /
+      `ha-grohe_smarthome` linking deliberately deferred (see the doc's
+      own §4.4) -- a dedicated architecture review recommended against
+      forking that project (cloud-only device model, near-zero code
+      reuse), not an M15 blocker.
+- [x] **Automated tests**: 37 passed (grown from an initial 14 as real
+      gaps were found during hardware acceptance) -- HTTP API client,
+      config flow, full entity setup, simulated end-to-end dispense/stop
+      flows, and an executable encoding of the dial's own state-field
+      consistency contract.
+- [x] **Hardware acceptance, including the real Home Assistant
+      integration**: installed on a real HA instance, Config Flow
+      completed against the real dial, Still/Medium/Sparkling each
+      dispensed for real via `grohe_dial.dispense`, a 1340 mL pour
+      stopped mid-flight via `grohe_dial.stop` (confirmed by the
+      firmware's own serial log), config round-trip verified via a
+      direct API read (not just the HA-side cached value), 40 rapid
+      parallel requests with 0 errors, 0 crashes across the whole pass.
+- [x] **Two real bugs found and fixed during hardware acceptance**
+      (`docs/m15_ha_integration.md` §6a): a `NumberSelector`-sourced
+      float port silently broke the Config Flow's persisted data
+      (`141db73`); both HA services were registered as plain lambdas,
+      which Home Assistant's dispatcher never awaited, so service calls
+      reported success while doing nothing at all (`57d2b7e`). Both
+      have dedicated regression tests that fail against the old code and
+      pass against the fix.
+- [x] **Concurrency fix**: an independent review of `App::Status()`
+      found it could, in principle, read `DialController::State()`
+      mid-transition from the wrong task, risking an internally
+      inconsistent snapshot (not just a stale one). Closed by routing
+      the read through the same app-task queue the write side already
+      uses (`d8ff91c`).
+- [ ] **Not tested**: a real `POST /ota` firmware upload (routing and
+      `GET /version` are hardware-verified; the actual upload path
+      wasn't exercised this milestone -- explicitly out of M15's core
+      scope, not a blocker).
+- [ ] **Deferred, not an M15 blocker**: Cloud login / Grohe Blue Home
+      linking, `via_device` device linking, the dial's stable MAC-based
+      `unique_id` (host/IP used instead today), multi-appliance BLE
+      disambiguation. CO₂/filter/consumables are a hard architectural
+      boundary, not a deferred feature -- the dial's BLE link to the
+      Grohe Blue Home never carries that data.
+
+Committed as four commits, all merged to `main` (`bb10480`, `d8ff91c`,
+`141db73`, `57d2b7e`), M14 (`c31058a`) unchanged as their ancestor.
+
 ## v1.0 Release Criteria
 
 What "version 1.0" means for this project -- the minimum bar for the

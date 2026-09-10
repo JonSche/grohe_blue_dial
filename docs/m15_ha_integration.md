@@ -1,6 +1,6 @@
 # M15 — Native Home Assistant Integration (Local HTTP, MQTT Removed)
 
-> **Status: implemented and hardware-verified for the core vertical slice.** M14 (`c31058a`) is untouched. **No commit has been made** — this entire milestone is still uncommitted, pending review. Tags used throughout: **IMPLEMENTED**, **TESTED** (automated), **HARDWARE TESTED** (real device/real Grohe Blue), **NOT TESTED**, **UNKNOWN**.
+> **Status: COMPLETE.** Implemented, automated-tested, and hardware-accepted end to end — including the real Home Assistant integration (installed on a real HA instance, real Config Flow, real device/entities, real `grohe_dial.dispense`/`grohe_dial.stop` service calls that produced real physical water dispenses and a real mid-pour stop on the actual Grohe Blue Home). M14 (`c31058a`) is untouched. Committed as four commits on `main`: `bb10480` (feature), `d8ff91c`, `141db73`, `57d2b7e` (three hardening/bugfix follow-ups, see §6a). Tags used throughout: **IMPLEMENTED**, **AUTOMATED TESTED**, **HARDWARE TESTED** (real device/real Grohe Blue/real Home Assistant), **NOT TESTED**, **DEFERRED**.
 
 ---
 
@@ -32,7 +32,7 @@ Removed in full:
 
 Verified by repository-wide grep for `mqtt`/`MqttClient`/`dial_mqtt`/topic names after removal — every remaining hit is either historical commentary (explicitly dated, e.g. "M13.3 investigation") or this document's own analysis; none is live code.
 
-**Build**: clean, zero new warnings (13 pre-existing warnings only, unchanged from M14).
+**Build**: clean, zero new warnings (15 pre-existing warnings only — `-Wmissing-field-initializers`/`-Wextra` in files M15 never touched — unchanged from M14, re-verified on the final `idf.py fullclean && idf.py build`, see §6b).
 **Hardware**: 3 consecutive boot cycles, 0 crashes, full BLE chain + OTA + Provisioning all functional (see §7).
 
 ---
@@ -69,9 +69,10 @@ Two new, additive `DialController` methods (`RequestDispenseAction()`, `RequestS
 - New tiny component `components/dial_api/` — an abstract interface (`dial_api::DialApiHandler`) both `app` and `provisioning` depend on, avoiding a circular CMake dependency (`app` already `REQUIRES provisioning`).
 - `app::App` implements the interface. `RequestDispense()`/`RequestStop()` (called from the httpd task) push a command onto a depth-1 `QueueHandle_t`, then block (1 s bounded timeout) on a depth-1 result queue.
 - `App::Run()`'s own loop drains the command queue once per 20 ms tick, right where the encoder-poll callback already lives, and posts the result back via `xQueueOverwrite()`.
-- `Status()`/`Config()` are plain reads (documented as safe on this single-core chip, mirroring `BleManager::State()`'s own established precedent); `SetConfig()` needs no synchronization at all — `dial_settings_` is httpd-task-exclusive after boot (the app task's own one-time `ApplySettings()` read already happened during startup).
+- `Config()` is a plain read (no synchronization needed — `dial_settings_` is httpd-task-exclusive after boot, the app task's own one-time `ApplySettings()` read already happened during startup); `SetConfig()` likewise.
+- `Status()` **also** goes through the same command/result queue mechanism as of a follow-up fix (`d8ff91c`, see §6a) — a direct cross-task read was found, on independent review, to risk observing a torn combination of fields mid-transition (not just a stale-but-coherent snapshot). Closed by routing every `/api/status` read through the app task too, the same place every write already happens.
 
-**Hardware-verified real dispense/stop round-trip** (see §7) — the queue hand-off, `DialController`'s new entry points, and the existing BLE/HMAC path all worked correctly together on the first attempt.
+**Hardware-verified real dispense/stop round-trip** (see §6b) — the queue hand-off, `DialController`'s new entry points, and the existing BLE/HMAC path all worked correctly together, including through the real Home Assistant integration end to end.
 
 ### 3.3 Authentication (M15.3) — IMPLEMENTED, HARDWARE TESTED
 
@@ -83,11 +84,11 @@ New, separate token (`X-Api-Token`, `provisioning::ApiSecretProvider`/`LocalApiS
 
 ---
 
-## 4. Native Home Assistant integration (M15.5–M15.8) — IMPLEMENTED, mix of TESTED and NOT TESTED (see below)
+## 4. Native Home Assistant integration (M15.5–M15.8) — IMPLEMENTED, HARDWARE TESTED end to end
 
 New Python package: **`homeassistant/custom_components/grohe_dial/`** in this same repository (a deliberate placement choice, not a silent one — no separate HA config directory/repo was available in this environment; documented here explicitly).
 
-### 4.1 Config Flow (IMPLEMENTED, TESTED)
+### 4.1 Config Flow (IMPLEMENTED, HARDWARE TESTED — see §6a for the float-port bug found and fixed here)
 
 Local-only for this vertical slice, per your explicit instruction (no Cloud login required to get a working device):
 
@@ -101,7 +102,7 @@ Add Integration → "Grohe Dial"
 
 Reauth flow (`async_step_reauth`) implemented for an expired/rotated token.
 
-### 4.2 Device/entity model (IMPLEMENTED, TESTED)
+### 4.2 Device/entity model (IMPLEMENTED, HARDWARE TESTED — all 9 entities confirmed on a real device)
 
 | Entity | Platform | Why | Writes through |
 |---|---|---|---|
@@ -116,54 +117,79 @@ Reauth flow (`async_step_reauth`) implemented for an expired/rotated token.
 
 `Grohe Blue Home └── Grohe Dial` via `via_device`: **NOT IMPLEMENTED this milestone** — see §4.4.
 
-### 4.3 Services (IMPLEMENTED, NOT TESTED beyond schema/registration)
+### 4.3 Services (IMPLEMENTED, HARDWARE TESTED — real bug found and fixed here, see §6a)
 
-`grohe_dial.dispense` (`amount_ml`, `water_type`, entity-targeted) and `grohe_dial.stop` — standard HA entity-service pattern (`cv.make_entity_service_schema`), resolving the target entity back to its config entry's coordinator. Registered once, globally, guarded against double-registration across multiple config entries. Schema/registration verified by the full-setup test (§5); the actual dispense/stop *call path* through these specific service handlers was not separately exercised (it shares its implementation with `button.py`'s already-tested path, but the service-specific target-resolution code (`_coordinator_for_entity`) has no dedicated test — **NOT TESTED**).
+`grohe_dial.dispense` (`amount_ml`, `water_type`, entity-targeted) and `grohe_dial.stop` — standard HA entity-service pattern (`cv.make_entity_service_schema`), resolving the target entity back to its config entry's coordinator. Registered once, globally, guarded against double-registration across multiple config entries.
 
-### 4.4 Cloud login / Grohe Blue linking — NOT IMPLEMENTED, deferred
+Both services were exercised for real against the physical dial through a real Home Assistant instance — `grohe_dial.dispense` produced real Still/Medium/Sparkling water dispenses; `grohe_dial.stop` stopped a real, in-progress pour. This is what actually caught the service-registration bug fixed in `57d2b7e` (see §6a): the schema/registration-only automated test that existed before hardware acceptance could not have caught it, because the bug was in *how the handler was awaited*, not in schema validation — the call "succeeded" with zero effect. Two new regression tests (`test_dispense_service_success_path_actually_reaches_the_api`, `test_stop_service_success_path_actually_reaches_the_api` in `tests/test_integration_flow.py`) now assert the service call actually reaches the (faked) dial, not just that it validates.
 
-Per your explicit instruction ("Für den ersten funktionierenden Vertical Slice darf die Konfiguration zunächst lokal erfolgen"), this milestone does not implement Cloud login or `ha-grohe_smarthome` linking. The prior analysis phase (`docs/m15_ha_integration_analysis.md` §5.4) verified, against `ha-grohe_smarthome`'s actual source, that **Option A (reusing its `entry.runtime_data`) is technically feasible** — not re-verified or implemented here. Two concrete, known limitations as a result:
+### 4.4 Cloud login / Grohe Blue linking — NOT IMPLEMENTED, deliberately deferred
 
-1. **`via_device` linking to a Grohe Blue Home device is not implemented.** Would need either the cloud-login integration above, or a manually-entered `appliance_id`.
-2. **Config-entry `unique_id` is the dial's host/IP, not its true stable Wi-Fi-MAC identity.** The firmware's `GET /version` does not currently expose the MAC (only version/commit/branch); adding it was considered but deferred to avoid further firmware changes within this already-large milestone. A dial that changes IP (no DHCP reservation) would need to be re-added in HA, not silently re-matched. **Documented risk, not hidden.**
+This milestone does not implement Cloud login or `ha-grohe_smarthome` linking — the local-only Config Flow (host/port/API token, §4.1) is the deliberate, permanent architecture for *this* integration, not a placeholder. A dedicated architecture review (post-M15, before this documentation update) explicitly evaluated forking/extending `ha-grohe_smarthome` to add the dial as a second device type and concluded **against** it for now: that project's device model, discovery, and coordinator are all built around its cloud API client (`iot_class: cloud_polling`, devices enumerated from a cloud dashboard call, `GroheTypes` sourced from an external PyPI package) — the dial has no cloud registration at all, so almost nothing would actually be reusable, and a fork would mean carrying an entire unrelated cloud-integration codebase for near-zero shared code. **Not an M15 blocker** — a possible future direction, not started, not required for M15 or any planned M16 work.
+
+Two concrete, known limitations as a result of staying local-only:
+
+1. **`via_device` linking to a Grohe Blue Home device is not implemented.** Would need either a cloud-login integration, or a manually-entered `appliance_id`.
+2. **Config-entry `unique_id` is the dial's host/IP, not its true stable Wi-Fi-MAC identity.** The firmware's `GET /version` does not currently expose the MAC (only version/commit/branch). A dial that changes IP (no DHCP reservation) would need to be re-added in HA, not silently re-matched. **Documented risk, not hidden** — unchanged by this milestone's hardware acceptance, not re-evaluated.
 
 ---
 
-## 5. Automated tests — TESTED (genuinely run, not just written)
+## 5. Automated tests — AUTOMATED TESTED (genuinely run, not just written)
 
-Ran against a real, current Home Assistant core (2026.9.1) and `pytest-homeassistant-custom-component` 0.13.364, installed fresh into a throwaway venv (`homeassistant/.venv-test/`, gitignored) specifically to verify this code, not left as unverified claims:
+Ran against a real, current Home Assistant core (2026.9.1) and `pytest-homeassistant-custom-component` 0.13.364, installed fresh into a throwaway venv (`homeassistant/.venv-test/`, gitignored) specifically to verify this code, not left as unverified claims. Grown across the hardware acceptance pass (§6a/§6b) as real gaps were found:
 
 ```
-14 passed in 0.38s
+37 passed in ~1s
 ```
 
 | File | What | Result |
 |---|---|---|
-| `tests/test_api.py` (9 tests) | `GroheDialApiClient` against a real `aiohttp` `TestServer` fake of the firmware's own endpoints — status/config GET/POST, dispense accept/reject, stop reject, invalid token | **TESTED, all pass** |
-| `tests/test_config_flow.py` (4 tests) | Success, invalid auth, cannot-connect, duplicate-host-abort — against HA's real `config_entries.flow` machinery | **TESTED, all pass** |
-| `tests/test_init.py` (1 test) | Full `async_setup_entry` → device registry entry created with correct identifiers, **all 9 entities** across all 5 platforms registered under it, both services registered, clean unload | **TESTED, all pass** |
+| `tests/test_api.py` (12 tests) | `GroheDialApiClient` against a real `aiohttp` `TestServer` fake of the firmware's own endpoints — status/config GET/POST, dispense accept/reject, stop reject, invalid token, malformed response, HTTP 500 timeout-reason, connection timeout | **AUTOMATED TESTED, all pass** |
+| `tests/test_config_flow.py` (5 tests) | Success, invalid auth, cannot-connect, duplicate-host-abort, float-port normalization (regression, §6a) — against HA's real `config_entries.flow` machinery | **AUTOMATED TESTED, all pass** |
+| `tests/test_init.py` (2 tests) | Full `async_setup_entry` → device registry entry created with correct identifiers, **all 9 entities** across all 5 platforms registered under it, both services registered, clean unload; legacy float-port config entry self-heals (regression, §6a) | **AUTOMATED TESTED, all pass** |
+| `tests/test_integration_flow.py` (8 tests) | Full simulated dispense/stop flow through real coordinator + entities against a fake stateful dial (DISPENSING→delivered_ml counting up→FINISHED→IDLE; DISPENSING→STOPPING→IDLE), dial-unavailable/recovery, service schema rejection, **service call success path actually reaching the (fake) dial** (regression for §6a's service-registration bug) | **AUTOMATED TESTED, all pass** |
+| `tests/test_status_consistency.py` (10 tests) | Encodes `dial_state.hpp`'s field-consistency contract executably (IDLE/DISPENSING/STOPPING/FINISHED/FAILED/BLE-disconnected) and proves the checker rejects the exact torn combination the concurrency fix (§3.2, `d8ff91c`) addresses | **AUTOMATED TESTED, all pass** |
 
-This test run **found and fixed a real bug**: `DeliveredAmountSensor`'s original `device_class="volume"` + `state_class=MEASUREMENT` combination is rejected by Home Assistant's own entity validation (volume sensors require `total`/`total_increasing`). Fixed by removing both attributes (see §4.2's own reasoning) — verified by re-running the same test afterward.
+This suite **found and fixed three real bugs** across its growth: `DeliveredAmountSensor`'s invalid `device_class`/`state_class` combination (original M15 implementation pass), and the two hardware-acceptance bugs in §6a (float port, service registration) — each has a dedicated regression test that reproducibly fails against the old code and passes against the fix.
 
-**Every module** (`__init__.py`, `api.py`, `config_flow.py`, `coordinator.py`, `entity.py`, every platform file, `services.py`) was also confirmed to **import cleanly** against real Home Assistant core in isolation, before the fuller test suite existed.
+**Every module** (`__init__.py`, `api.py`, `config_flow.py`, `coordinator.py`, `entity.py`, every platform file, `services.py`) was also confirmed to **import cleanly** against real Home Assistant core in isolation.
 
-**Not tested / not run in this environment**: the actual Home Assistant UI (Settings → Devices & Services → Add Integration) was never opened in a browser — only the underlying `config_entries` API the UI itself calls. No live HA instance with this integration installed via HACS or manually copied into a real `config/custom_components/` was exercised end-to-end.
+**Scope note, honestly stated**: this suite exercises the integration's own logic against fakes (a real `aiohttp` test server standing in for the firmware, or an in-process fake dial state machine) — it does not and cannot exercise the real ESP32 firmware binary or FreeRTOS scheduling. That verification is §6b (real hardware) and, for the concurrency fix specifically, code review (this project has no host-side C++/FreeRTOS test harness — see §5's own scope note in earlier project docs).
 
 ---
 
-## 6. Regression testing (M15.11) — HARDWARE TESTED
+## 6. Regression testing — HARDWARE TESTED
 
-Firmware, after the full MQTT removal + HTTP API implementation, tested together on real hardware (3+ separate boot cycles across this milestone, plus one final combined pass):
+### 6a. Real bugs found and fixed during hardware acceptance
+
+M15 was committed (`bb10480`) after the firmware-only regression pass documented below, then put through a full **hardware acceptance pass including the real Home Assistant integration** — not just curl against the API, but the integration installed on a real HA instance, added via its real Config Flow, and driven through real `grohe_dial.dispense`/`grohe_dial.stop` service calls against the physical dial. That pass found and fixed two real, independent bugs, each as its own follow-up commit on `m15` (later merged into `main`):
+
+| Commit | Bug | Symptom | Fix |
+|---|---|---|---|
+| `d8ff91c` | `App::Status()` read `DialController::State()` directly from the httpd task while the app task could be mid-way through a multi-field state transition (e.g. `dispense_status`/`active_dispense_amount_ml`/`delivered_ml` together) — a torn, internally-inconsistent snapshot was possible in principle (found on independent code review, not observed as a live failure) | N/A — closed before it could manifest | `Status()` now round-trips through the same app-task command queue `RequestDispense()`/`RequestStop()` already use, closing the cross-task read entirely; see §3.2 |
+| `141db73` | `homeassistant.helpers.selector.NumberSelector` always yields a Python `float` for the port field, regardless of UI input. Config Flow validated it correctly (a local `int()` cast for its own check) but then persisted the **original float** via `async_create_entry(data=user_input)` | Config entry stored `port: 8080.0`; `GroheDialApiClient` built the URL `http://<host>:8080.0` — permanently invalid, integration never connected (`ConfigEntryNotReady`, retried forever) | Config Flow normalizes to `int` before persisting (both the user flow and reauth flow); `__init__.py` additionally re-casts defensively on every setup, so a config entry already created before this fix self-heals without removal/re-add |
+| `57d2b7e` | `grohe_dial.dispense`/`grohe_dial.stop` were registered as `lambda call: _async_handle_dispense(hass, call)`. Calling the lambda returns a coroutine, but the lambda itself is not a coroutine function (`asyncio.iscoroutinefunction()` is `False` for it) — Home Assistant's service dispatcher uses exactly that check to decide whether to await the handler, and did not for this one | The service call showed **success** in Home Assistant with **zero** effect — no HTTP request ever reached the dial (confirmed by a live serial-log capture showing 0 bytes during the call), no exception, entity buttons (`button.py`) unaffected (different call path) | Registered genuine `async def` closures instead; two regression tests assert the service call actually reaches a fake dial, and both reproducibly fail against the old lambda registration |
+
+All three fixed, automated-tested (37/37, see §5), deployed to the real Pi, and re-verified on real hardware before being accepted. Neither the pre-acceptance regression pass below nor the original automated test suite could have caught the port/service bugs — both are specifically about the integration's interaction with a *real* HA runtime and a *real* physical device, which is exactly what hardware acceptance exists to catch.
+
+### 6b. Firmware + full-stack regression — HARDWARE TESTED
+
+Firmware, after the full MQTT removal + HTTP API implementation, tested together on real hardware (3+ separate boot cycles across this milestone, plus the hardware acceptance pass):
 
 | Area | Result |
 |---|---|
 | BLE (discovery, connect, GATT discovery, characteristic caching, subscribe) | **HARDWARE TESTED**, working, 0 crashes across every run |
-| OTA (`GET /version`) | **HARDWARE TESTED**, live-curled, correct response |
+| OTA (`GET /version`, routing) | **HARDWARE TESTED**, live-curled, correct response. A real `POST /ota` firmware upload was **NOT TESTED** in this milestone — explicitly out of M15's core scope, not a blocker (see §8) |
 | Provisioning (`POST /provision`, unauthorized → 401) | **HARDWARE TESTED**, live-curled |
-| Local API — all 5 endpoints, auth, malformed JSON, invalid amount/water_type, missing field, stop-while-idle (409) | **HARDWARE TESTED**, every case behaved exactly as designed |
-| **Real dispense + live status + stop**, against the actual Grohe Blue Home | **HARDWARE TESTED** — 100 mL STILL (full cycle), then 300 mL MEDIUM with a mid-flight `dispense_status: DISPENSING`/`delivered_ml` observation and a successful `POST /api/stop` mid-pour, confirmed via both the HTTP response and the firmware's own serial log (`Dispense requested via API`/`Stop requested via API`, `result=0`) |
-| Crashes | **0** across every test run this milestone |
-| New compiler warnings | **0** (13 pre-existing warnings only, unchanged from M14) |
+| Local API — all 5 endpoints, auth, malformed JSON, invalid amount/water_type, missing field, stop-while-idle (409), duplicate dispense while one is in flight (409, correctly rejected) | **HARDWARE TESTED**, every case behaved exactly as designed |
+| **Real dispense + live status + stop**, against the actual Grohe Blue Home, via curl | **HARDWARE TESTED** — 100 mL STILL (full cycle), then 300 mL MEDIUM with a mid-flight `dispense_status: DISPENSING`/`delivered_ml` observation and a successful `POST /api/stop` mid-pour |
+| **Real dispense + stop, via the real Home Assistant integration** (`grohe_dial.dispense`/`grohe_dial.stop`) | **HARDWARE TESTED** — Still, Medium, and Sparkling each dispensed for real via the HA service call; a 1340 mL Still pour was stopped mid-flight via `grohe_dial.stop`, confirmed by the firmware's own serial log (`Dispense requested via API` → BLE write → appliance `SUCCESS`, then ~21s later `Stop requested via API` → BLE write → appliance `SUCCESS`) |
+| Home Assistant install/Config Flow/entities, on a real HA instance | **HARDWARE TESTED** — integration installed into a real `custom_components/`, Config Flow completed against the real dial, device created with all 9 entities registered |
+| Config round-trip via HA | **HARDWARE TESTED** — `amount_step_ml` changed via the HA `number` entity, verified persisted via a direct `GET /api/config` (not just the HA-side cached display value) |
+| Status consistency during a live dispense | **HARDWARE TESTED** — repeatedly polled `/api/status` during real in-progress pours; no torn/inconsistent field combination ever observed, consistent with the `d8ff91c` fix (§3.2) |
+| Robustness (40 rapid parallel status/config requests, ~50 min of active use) | **HARDWARE TESTED** — all 200s, no crash/disconnect/watchdog |
+| Crashes | **0** across every test run this milestone, including the full hardware acceptance pass |
+| New compiler warnings | **0** (15 pre-existing warnings only, unchanged from M14, verified on a clean `idf.py fullclean && idf.py build`) |
 
 ---
 
@@ -175,7 +201,10 @@ Firmware, after the full MQTT removal + HTTP API implementation, tested together
 |---|---:|---:|
 | M14 baseline (with MQTT) | 1,767,776 B | — |
 | M15.1 (MQTT removed) | 1,587,536 B | **−176.0 KiB** |
-| M15 final (+ local HTTP API) | 1,619,424 B | **−144.9 KiB** |
+| M15 (`bb10480`, + local HTTP API) | 1,619,424 B | **−144.9 KiB** |
+| M15 final (`57d2b7e`, + status-snapshot queue + fixes) | 1,620,064 B | **−144.3 KiB** |
+
+The +640 B since `bb10480` is the new `api_status_queue_` FreeRTOS queue and the `App::Status()` cross-task hand-off logic added by `d8ff91c` (§3.2/§6a) — the two Home Assistant bugfixes (`141db73`, `57d2b7e`) are Python-only and don't touch the firmware build at all.
 
 ### 7.2 RAM (`internal_free`, bytes — `mem_diag` checkpoints, 2–3 hardware runs per stage, consistent/reproducible)
 
@@ -190,18 +219,31 @@ Firmware, after the full MQTT removal + HTTP API implementation, tested together
 
 All values 0 crashes, reproducible across repeated boots. **M14's own RAM optimizations are fully intact** — this milestone builds on top of them, doesn't touch `sdkconfig.defaults`'s BLE/NimBLE Kconfig candidates at all.
 
+**Re-measured on `57d2b7e`** (after `d8ff91c`'s status-snapshot queue) during hardware acceptance, multiple boots: `BOOT` internal_free 167,156–167,204; `BLE_SUBSCRIBED` internal_free 30,448–30,476, largest 12,800. Within ~100 B of the pre-fix range above — the extra queue/cache (§7.1) is noise-level against a ~30 KB free steady state, not a measurable regression.
+
 ---
 
 ## 8. Known limitations / deferred (explicit, not silently dropped)
 
-- Cloud login / `ha-grohe_smarthome` linking (§4.4) — deferred, not started.
-- `via_device` Grohe Blue ↔ Dial linking — blocked on the above.
-- Dial's stable MAC-based `unique_id` — deferred; host/IP used instead.
-- CO₂/filter/consumables — architecturally out of reach of this API (BLE never carries it); would require the cloud-login work above regardless.
-- Multi-appliance BLE disambiguation (derived device name from serial number, `docs/m15_ha_integration_analysis.md` §1.3) — not implemented; today's single-appliance service-UUID-only match is unchanged.
-- `grohe_dial.dispense`/`grohe_dial.stop` services' own target-resolution code path — not independently tested (shares implementation with the already-tested button path).
-- No live HA UI / HACS installation exercised — only the underlying `config_entries` machinery, via automated tests.
+These are **not** gaps in M15's testing — they are deliberate scope boundaries, unaffected by hardware acceptance:
+
+- **Cloud login / `ha-grohe_smarthome` fork or extension** (§4.4) — deliberately deferred, not started. A dedicated architecture review considered forking/extending `ha-grohe_smarthome` and recommended against it for now (see §4.4) — a possible future direction, **not an M15 blocker**, not planned for M16 either unless separately decided.
+- **`via_device` Grohe Blue ↔ Dial linking** — blocked on the above.
+- **Dial's stable MAC-based `unique_id`** — deferred; host/IP used instead (§4.4, point 2).
+- **CO₂/filter/consumables** — a known technical boundary of the architecture, not a missing feature: the dial's BLE connection to the Grohe Blue Home never carries this data (cloud-only, confirmed against the GroheWatersystems decompilation, §3), so the local HTTP API has nothing to expose here regardless of implementation effort. Would require the cloud-login work above to ever become available.
+- **Multi-appliance BLE disambiguation** (derived device name from serial number) — not implemented; today's single-appliance service-UUID-only match is unchanged.
+- **Real `POST /ota` firmware-upload path** — routing and `GET /version` are hardware-verified (§6b); an actual upload exercising `esp_ota_write()` was not performed this milestone. Explicitly out of M15's core scope (local HTTP API + HA integration), not a blocker.
 
 ## 9. Git
 
-**No commit made.** All M15 changes remain in the working tree, deliberately staged for your review before any commit — see the accompanying summary for the exact `git status`/`git diff --stat`.
+Four commits, all on `main` (fast-forwarded from `m15`, no merge commit, M14 `c31058a` untouched as an ancestor):
+
+```
+57d2b7e fix(ha): register services as coroutine functions, not lambdas
+141db73 fix(ha): normalize config entry port to int, not float
+d8ff91c fix(api): make status snapshots task-safe
+bb10480 feat(ha): add local HTTP API and Home Assistant integration
+c31058a perf(memory): optimize BLE and HTTP server RAM usage   <- M14, untouched
+```
+
+`bb10480` is the original feature commit (this document's §1–§7 core content); the three fixes above it were found and fixed during hardware acceptance (§6a) and merged after independent verification on real hardware.

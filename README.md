@@ -149,14 +149,15 @@ Print files, print settings, and assembly steps live in
 
 ```mermaid
 flowchart LR
+    HA(["Home Assistant<br/>native custom integration"]) -->|"local HTTP<br/>API token"| API["Local HTTP API"]
     subgraph Dial["Grohe Dial firmware"]
         direction TB
-        Enc(["Rotary encoder"]) --> Ctrl["Dial controller"]
+        API --> Ctrl["Dial controller"]
+        Enc(["Rotary encoder"]) --> Ctrl
         Ctrl --> UI["Round UI — LVGL"]
         Ctrl --> BLE["BLE client"]
     end
     BLE <-->|"Bluetooth LE<br/>authenticated, HMAC-signed"| Appliance(["GROHE Blue Home"])
-    Dial -.->|"optional, HTTPS"| HA(["Home Assistant"])
 ```
 
 One composition root wires together small, single-purpose components — BLE,
@@ -177,7 +178,8 @@ the reasoning behind every non-obvious decision live in
 | Water types — Still / Medium / Sparkling | ✅ Hardware-validated |
 | Firmware version/build metadata | ✅ Implemented, build-verified |
 | OTA firmware updates (Wi-Fi, plain HTTP + shared secret) | ✅ Hardware-validated |
-| Home Assistant integration | 🔜 Planned, always optional |
+| Local HTTP API (status/config/dispense/stop, token-authenticated) | ✅ Hardware-validated |
+| Home Assistant integration — native custom integration, always optional | ✅ Hardware-validated |
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the complete milestone-by-milestone
 history, and its "v1.0 Release Criteria" section for what "done" means for
@@ -217,7 +219,7 @@ I (536) main_task: Started on CPU0
 ```
 
 <details>
-<summary><strong>Full implemented/planned feature list</strong></summary>
+<summary><strong>Full feature list</strong></summary>
 <br>
 
 Implemented:
@@ -237,12 +239,21 @@ Implemented:
 - [x] Wi-Fi OTA firmware updates (local network, plain HTTP + shared-secret
       auth, automatic rollback on a failed boot; USB remains the recovery
       path)
+- [x] Local HTTP API (status, config, dispense, stop — token-authenticated,
+      same local network as OTA/provisioning) — the dial never requires a
+      network connection for basic dispensing; this is purely additive
+- [x] Home Assistant integration — a native custom integration living in
+      this repository (`homeassistant/custom_components/grohe_dial/`,
+      not a separate HACS/official Grohe plugin), talking to the dial
+      over the local HTTP API above, always optional
 
-Planned:
+Known limitations, not planned work:
 
-- [ ] Optional Home Assistant integration — configuration, diagnostics, and
-      appliance status (CO₂, filter, firmware version); never required for
-      basic dispensing
+- CO₂/filter/consumables status is never available — the dial's BLE link
+  to the appliance doesn't carry it (cloud-only on Grohe's side), so no
+  amount of firmware work exposes it
+- The Home Assistant integration identifies the dial by its host/IP, not
+  a stable hardware identity; a dial that changes IP needs to be re-added
 
 </details>
 
@@ -259,10 +270,10 @@ Planned:
 | Firmware version/build metadata | ✅ Shipped |
 | OTA firmware updates (Wi-Fi, plain HTTP + shared secret) | ✅ Shipped |
 | Debugging & flashing tooling | 🔜 Optional, not required for v1.0 |
-| Home Assistant integration | 🔜 Planned |
+| Local HTTP API + native Home Assistant integration (M15) | ✅ Shipped |
 
 [`docs/ROADMAP.md`](docs/ROADMAP.md) is organized as one section per
-milestone (M0 through M13), each with its own scope and, once complete, a
+milestone (M0 through M15), each with its own scope and, once complete, a
 hardware-validation summary — the authoritative history of how this
 firmware got to where it is today.
 
