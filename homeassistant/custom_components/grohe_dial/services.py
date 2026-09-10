@@ -57,9 +57,27 @@ def async_register_services(hass: HomeAssistant) -> None:
     if hass.services.has_service(DOMAIN, SERVICE_DISPENSE):
         return  # Already registered by an earlier config entry's setup.
 
-    hass.services.async_register(
-        DOMAIN, SERVICE_DISPENSE, lambda call: _async_handle_dispense(hass, call), schema=DISPENSE_SCHEMA
-    )
-    hass.services.async_register(
-        DOMAIN, SERVICE_STOP, lambda call: _async_handle_stop(hass, call), schema=STOP_SCHEMA
-    )
+    # Real bug found on real hardware: a plain `lambda call:
+    # _async_handle_dispense(hass, call)` *returns* a coroutine when
+    # called, but the lambda itself is not a coroutine function --
+    # asyncio.iscoroutinefunction(that lambda) is False, even though
+    # asyncio.iscoroutinefunction(_async_handle_dispense) is True. Home
+    # Assistant's service dispatcher uses exactly that check to decide
+    # whether to await the handler; for a plain (non-coroutine) callable
+    # it does not await the return value, so the returned coroutine was
+    # silently never awaited -- the actual handler body (the entity
+    # loop, the HTTP call) never ran at all. No exception, no network
+    # request, "success" reported back to the caller. Fixed by
+    # registering a genuine `async def` closure instead, which *is* a
+    # coroutine function and gets awaited correctly. Entity actions
+    # (button.py's DispenseButton/StopButton) were never affected --
+    # HA's entity platform calls async_press() directly, not through
+    # this registration path.
+    async def _dispense_service(call: ServiceCall) -> None:
+        await _async_handle_dispense(hass, call)
+
+    async def _stop_service(call: ServiceCall) -> None:
+        await _async_handle_stop(hass, call)
+
+    hass.services.async_register(DOMAIN, SERVICE_DISPENSE, _dispense_service, schema=DISPENSE_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_STOP, _stop_service, schema=STOP_SCHEMA)

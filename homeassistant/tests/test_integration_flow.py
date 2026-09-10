@@ -312,3 +312,58 @@ async def test_dispense_service_rejects_invalid_water_type_before_any_http_call(
             blocking=True,
         )
     assert fake.dispense_calls == 0
+
+
+async def test_dispense_service_success_path_actually_reaches_the_api(dial_setup) -> None:
+    # Regression test for a real bug found on real hardware: both
+    # services were registered as `lambda call:
+    # _async_handle_dispense(hass, call)` -- a plain lambda, not itself
+    # a coroutine function even though calling it returns one. Home
+    # Assistant's service dispatcher never awaited that returned
+    # coroutine, so the entire handler body (this exact HTTP call) never
+    # ran -- no exception, no request, but the service call still
+    # "succeeded" from the caller's point of view. The two tests above
+    # (invalid amount/water_type) only ever exercised the *schema
+    # rejection* path, which happens before the handler runs either way
+    # -- they could not have caught this. This test is the one that
+    # would have: it demands the fake dial actually observed the call.
+    hass, entry, fake = dial_setup
+    dispense_button_id = _entity_id(hass, "button", "dispense")
+
+    # 500ml, not 250: FakeDial._advance() (see its own comment) steps by
+    # 250ml per poll and coordinator.async_request_refresh() below
+    # triggers exactly one poll -- a 250ml request would already read
+    # back as FINISHED (250 >= 250 in a single step), which is correct
+    # FakeDial behavior but would make this test's own status assertion
+    # fragile for the wrong reason. 500ml keeps it unambiguously
+    # DISPENSING after that one poll.
+    await hass.services.async_call(
+        DOMAIN,
+        "dispense",
+        {"entity_id": dispense_button_id, "amount_ml": 500, "water_type": "medium"},
+        blocking=True,
+    )
+
+    assert fake.dispense_calls == 1, "the service call never reached the dial -- see this test's own comment"
+    assert fake.status == "DISPENSING"
+    assert fake.amount_ml == 500
+    assert fake.water_type == "MEDIUM"
+
+
+async def test_stop_service_success_path_actually_reaches_the_api(dial_setup) -> None:
+    # Same bug, same fix, same regression-test shape as the dispense
+    # service test above -- grohe_dial.stop was registered the same
+    # broken way.
+    hass, entry, fake = dial_setup
+    dispense_button_id = _entity_id(hass, "button", "dispense")
+    stop_button_id = _entity_id(hass, "button", "stop")
+
+    await hass.services.async_call(
+        DOMAIN, "dispense", {"entity_id": dispense_button_id, "amount_ml": 500, "water_type": "medium"}, blocking=True
+    )
+    assert fake.status == "DISPENSING"
+
+    await hass.services.async_call(DOMAIN, "stop", {"entity_id": stop_button_id}, blocking=True)
+
+    assert fake.stop_calls == 1, "the stop service call never reached the dial -- see this test's own comment"
+    assert fake.status == "STOPPING"
