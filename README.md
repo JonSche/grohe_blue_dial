@@ -180,6 +180,9 @@ the reasoning behind every non-obvious decision live in
 | OTA firmware updates (Wi-Fi, plain HTTP + shared secret) | ✅ Hardware-validated |
 | Local HTTP API (status/config/dispense/stop, token-authenticated) | ✅ Hardware-validated |
 | Home Assistant integration — native custom integration, always optional | ✅ Hardware-validated |
+| HA connection retry/backoff, actionable error messages | ✅ Hardware-validated |
+| App-task watchdog (hang → automatic reset) | ⚠️ Mechanism hardware-proven, pending redeploy — see [M16 doc](docs/m16_reliability_and_provisioning.md) |
+| Grohe Cloud provisioning from Home Assistant | ✅ Implemented, automated-tested — hardware test pending |
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the complete milestone-by-milestone
 history, and its "v1.0 Release Criteria" section for what "done" means for
@@ -246,6 +249,16 @@ Implemented:
       this repository (`homeassistant/custom_components/grohe_dial/`,
       not a separate HACS/official Grohe plugin), talking to the dial
       over the local HTTP API above, always optional
+- [x] HA connection retry with exponential backoff, and actionable
+      HA error messages (dial unreachable vs. command rejected vs.
+      unexpected) instead of a generic exception string
+- [x] App-task watchdog — a future firmware hang now triggers an
+      automatic reset instead of freezing the dial indefinitely
+- [x] Grohe Blue Home provisioning from Home Assistant — a guided
+      Options Flow that fetches BLE credentials from the Grohe Cloud
+      (reusing the existing `grohe` Python package, no separate Grohe
+      Cloud API implementation) and provisions the dial directly, no
+      manual `scripts/provision.sh` step needed
 
 Known limitations, not planned work:
 
@@ -271,9 +284,10 @@ Known limitations, not planned work:
 | OTA firmware updates (Wi-Fi, plain HTTP + shared secret) | ✅ Shipped |
 | Debugging & flashing tooling | 🔜 Optional, not required for v1.0 |
 | Local HTTP API + native Home Assistant integration (M15) | ✅ Shipped |
+| HA reliability hardening + Grohe Cloud provisioning (M16) | ⚠️ Mostly shipped — see [`docs/m16_reliability_and_provisioning.md`](docs/m16_reliability_and_provisioning.md) |
 
 [`docs/ROADMAP.md`](docs/ROADMAP.md) is organized as one section per
-milestone (M0 through M15), each with its own scope and, once complete, a
+milestone (M0 through M16), each with its own scope and, once complete, a
 hardware-validation summary — the authoritative history of how this
 firmware got to where it is today.
 

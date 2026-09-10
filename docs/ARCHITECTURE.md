@@ -640,6 +640,37 @@ to edit), uploads with `curl`, checks the HTTP status, then polls
 `GET /version` for up to 30 s to confirm the device came back and
 report what it's now running.
 
+### App-task watchdog (M16.3)
+
+`App::Run()`'s own steady-state loop registers itself with ESP-IDF's
+Task Watchdog Timer (`esp_task_wdt_add(nullptr)`, placed *after*
+`ota::ConfirmBootValid()` -- the init sequence before that point has
+its own legitimately variable-length waits, Wi-Fi association and BLE
+bring-up, that aren't individually instrumented with their own resets,
+so registering earlier would risk a false trip on a slow-but-healthy
+boot) and feeds it (`esp_task_wdt_reset()`) as the first statement of
+every loop iteration, comfortably inside the TWDT's 5 s default timeout
+at the loop's normal ~20 ms cadence.
+
+The TWDT itself is already an ESP-IDF default
+(`CONFIG_ESP_TASK_WDT_EN`/`_INIT`); what M16.3 adds on top is
+`CONFIG_ESP_TASK_WDT_PANIC=y` (`sdkconfig.defaults`), without which a
+trip only logs a warning and does nothing further. With it, a future
+bug that hangs the app task triggers an automatic panic-reset instead
+of freezing the dial forever -- and composes correctly with the OTA
+rollback guarantee above: a hang before `ConfirmBootValid()` leaves the
+image unconfirmed, so the reset this triggers also rolls the image
+back, not just reboots into the same bad build.
+
+Mechanism proven on real hardware via a temporary, fully-reverted
+diagnostic build (an induced hang plus a temporary `esp_reset_reason()`
+readout on `GET /version`): observed the reset reason transition
+`ESP_RST_SW` -> `ESP_RST_TASK_WDT` across the hang, confirming automatic
+recovery with no USB/serial intervention needed. See
+[`docs/m16_reliability_and_provisioning.md`](m16_reliability_and_provisioning.md)
+§3/§7 for the full account, including the OTA re-deployment status this
+left the physical test device in.
+
 ## Provisioning (M13.2)
 
 A second local-network HTTP endpoint, `POST /provision`, lets Home
@@ -822,6 +853,28 @@ this exact tree) and reading the official Android app's decompiled DTOs
 model/*.java`). `grohe_cloud_refresh.py` walks that tree for the one
 appliance carrying a `presharedkey` field, and refuses to guess (a clear
 error, not a silent pick) if none or more than one is found.
+
+### Home Assistant provisioning (M16.8)
+
+The Home Assistant integration's own Options Flow
+(`homeassistant/custom_components/grohe_dial/config_flow.py`'s
+`GroheDialOptionsFlow`, reachable from an already-added dial's
+"Configure" action) reuses every piece of the reference implementation
+above through a new thin adapter module, `cloud.py` -- no Grohe Cloud
+API logic is reimplemented a second time anywhere in this integration.
+Three steps -- Cloud login (email/password, used once, never stored) ->
+appliance selection (auto-skipped for a single-appliance account) -> the
+dial's own provisioning token -- end in exactly one call to the
+firmware's existing `POST /provision` endpoint above. **No firmware
+change was needed**: that endpoint already accepted precisely
+`{"user_id": ..., "preshared_key_base64": ...}`, which is exactly what
+`cloud.py`'s `user_id_from_access_token()` + `list_appliances()`
+produce. See
+[`docs/m16_reliability_and_provisioning.md`](m16_reliability_and_provisioning.md)
+§6/§8 for the full design and security rationale (secret separation
+between the Cloud password, the Cloud refresh token, and the dial's own
+provisioning/API tokens; no secrets in logs, verified by a dedicated
+automated test).
 
 ## MQTT / Home Assistant Discovery (M13.3, removed in M15)
 
