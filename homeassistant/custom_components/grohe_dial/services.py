@@ -17,7 +17,9 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 
+from .api import GroheDialApiError
 from .const import ATTR_AMOUNT_ML, ATTR_WATER_TYPE, DOMAIN, MAX_AMOUNT_ML, MIN_AMOUNT_ML, SERVICE_DISPENSE, SERVICE_STOP, WATER_TYPES
+from .errors import raise_as_home_assistant_error
 
 DISPENSE_SCHEMA = cv.make_entity_service_schema(
     {
@@ -42,14 +44,22 @@ def _coordinator_for_entity(hass: HomeAssistant, entity_id: str):
 async def _async_handle_dispense(hass: HomeAssistant, call: ServiceCall) -> None:
     for entity_id in call.data[cv.ATTR_ENTITY_ID]:
         coordinator = _coordinator_for_entity(hass, entity_id)
-        await coordinator.client.dispense(call.data[ATTR_AMOUNT_ML], call.data[ATTR_WATER_TYPE].upper())
+        try:
+            await coordinator.client.dispense(call.data[ATTR_AMOUNT_ML], call.data[ATTR_WATER_TYPE].upper())
+        except GroheDialApiError as err:
+            # M16.2: was an uncaught, generic "Unknown error" before --
+            # see errors.py's own header comment.
+            raise_as_home_assistant_error(err)
         await coordinator.async_request_refresh()
 
 
 async def _async_handle_stop(hass: HomeAssistant, call: ServiceCall) -> None:
     for entity_id in call.data[cv.ATTR_ENTITY_ID]:
         coordinator = _coordinator_for_entity(hass, entity_id)
-        await coordinator.client.stop()
+        try:
+            await coordinator.client.stop()
+        except GroheDialApiError as err:
+            raise_as_home_assistant_error(err)
         await coordinator.async_request_refresh()
 
 

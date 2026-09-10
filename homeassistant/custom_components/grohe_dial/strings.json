@@ -61,5 +61,16 @@
       "name": "Stop",
       "description": "Stop an in-progress dispense."
     }
+  },
+  "exceptions": {
+    "dial_unreachable": {
+      "message": "Grohe Dial is not reachable. Check that it is powered on and connected to the network."
+    },
+    "command_rejected": {
+      "message": "Grohe Blue rejected the request ({reason})."
+    },
+    "unexpected_dial_error": {
+      "message": "Unexpected error communicating with the Grohe Dial: {error}"
+    }
   }
 }

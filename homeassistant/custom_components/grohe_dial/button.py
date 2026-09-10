@@ -17,8 +17,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import GroheDialConfigEntry
+from .api import GroheDialApiError
 from .coordinator import GroheDialCoordinator
 from .entity import GroheDialEntity
+from .errors import raise_as_home_assistant_error
 
 
 async def async_setup_entry(
@@ -36,7 +38,12 @@ class DispenseButton(GroheDialEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         status = self.coordinator.data
-        await self.coordinator.client.dispense(status.amount_ml, status.water_type)
+        try:
+            await self.coordinator.client.dispense(status.amount_ml, status.water_type)
+        except GroheDialApiError as err:
+            # M16.2: was an uncaught, generic "Unknown error" before --
+            # see errors.py's own header comment.
+            raise_as_home_assistant_error(err)
         await self.coordinator.async_request_refresh()
 
 
@@ -47,5 +54,8 @@ class StopButton(GroheDialEntity, ButtonEntity):
         super().__init__(coordinator, "stop")
 
     async def async_press(self) -> None:
-        await self.coordinator.client.stop()
+        try:
+            await self.coordinator.client.stop()
+        except GroheDialApiError as err:
+            raise_as_home_assistant_error(err)
         await self.coordinator.async_request_refresh()
