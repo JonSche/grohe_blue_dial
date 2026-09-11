@@ -662,14 +662,16 @@ rollback guarantee above: a hang before `ConfirmBootValid()` leaves the
 image unconfirmed, so the reset this triggers also rolls the image
 back, not just reboots into the same bad build.
 
-Mechanism proven on real hardware via a temporary, fully-reverted
-diagnostic build (an induced hang plus a temporary `esp_reset_reason()`
-readout on `GET /version`): observed the reset reason transition
-`ESP_RST_SW` -> `ESP_RST_TASK_WDT` across the hang, confirming automatic
-recovery with no USB/serial intervention needed. See
+Mechanism proven on real hardware twice: once via a temporary diagnostic
+build (an induced hang plus a temporary `esp_reset_reason()` readout on
+`GET /version`, observing the reset reason transition `ESP_RST_SW` ->
+`ESP_RST_TASK_WDT`), and again via a second, isolated hang test built
+directly on top of the clean, current M16.3 source and flashed over USB,
+observed across 4 consecutive cycles (`task_wdt` fires ~6s in, panics,
+reboots cleanly, repeats). Both temporary changes were fully reverted
+before their respective final builds. See
 [`docs/m16_reliability_and_provisioning.md`](m16_reliability_and_provisioning.md)
-§3/§7 for the full account, including the OTA re-deployment status this
-left the physical test device in.
+§3/§7 for the full account.
 
 ## Provisioning (M13.2)
 

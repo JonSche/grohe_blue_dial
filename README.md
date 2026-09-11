@@ -181,8 +181,8 @@ the reasoning behind every non-obvious decision live in
 | Local HTTP API (status/config/dispense/stop, token-authenticated) | ✅ Hardware-validated |
 | Home Assistant integration — native custom integration, always optional | ✅ Hardware-validated |
 | HA connection retry/backoff, actionable error messages | ✅ Hardware-validated |
-| App-task watchdog (hang → automatic reset) | ⚠️ Mechanism hardware-proven, pending redeploy — see [M16 doc](docs/m16_reliability_and_provisioning.md) |
-| Grohe Cloud provisioning from Home Assistant | ✅ Implemented, automated-tested — hardware test pending |
+| App-task watchdog (hang → automatic reset) | ✅ Hardware-validated |
+| Grohe Cloud provisioning from Home Assistant | ✅ Hardware-validated |
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the complete milestone-by-milestone
 history, and its "v1.0 Release Criteria" section for what "done" means for
@@ -284,7 +284,7 @@ Known limitations, not planned work:
 | OTA firmware updates (Wi-Fi, plain HTTP + shared secret) | ✅ Shipped |
 | Debugging & flashing tooling | 🔜 Optional, not required for v1.0 |
 | Local HTTP API + native Home Assistant integration (M15) | ✅ Shipped |
-| HA reliability hardening + Grohe Cloud provisioning (M16) | ⚠️ Mostly shipped — see [`docs/m16_reliability_and_provisioning.md`](docs/m16_reliability_and_provisioning.md) |
+| HA reliability hardening + Grohe Cloud provisioning (M16) | ✅ Shipped — see [`docs/m16_reliability_and_provisioning.md`](docs/m16_reliability_and_provisioning.md) |
 
 [`docs/ROADMAP.md`](docs/ROADMAP.md) is organized as one section per
 milestone (M0 through M16), each with its own scope and, once complete, a

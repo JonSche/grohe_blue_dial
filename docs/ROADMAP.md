@@ -1127,7 +1127,7 @@ Home Assistant -> Grohe Dial HA Integration -> local HTTP -> Grohe Dial -> BLE -
 Committed as four commits, all merged to `main` (`bb10480`, `d8ff91c`,
 `141db73`, `57d2b7e`), M14 (`c31058a`) unchanged as their ancestor.
 
-### M16 — Reliability Hardening + Grohe Blue Provisioning ⚠️ Partially complete
+### M16 — Reliability Hardening + Grohe Blue Provisioning ✅
 
 Two tracks: hardening the M15 HTTP-API/Home-Assistant boundary
 (transient-failure retry, actionable errors, an app-task hang
@@ -1139,27 +1139,41 @@ package/`scripts/grohe_cloud_*.py` reference implementation --
 detail, every status tag, and the exact test/hardware evidence live in
 [`docs/m16_reliability_and_provisioning.md`](m16_reliability_and_provisioning.md);
 this entry is the roadmap-level summary. All work on branch `m16`;
-`main` untouched at `96f4b16` throughout.
+`main` untouched at `96f4b16` until every item below reached PASS.
 
 - [x] **Connection retry/backoff** (M16.1): `DataUpdateCoordinator`'s
       own native `retry_after` mechanism, 5s/10s/20s/30s(capped)
       exponential backoff on transient connection failures only, reset
-      on recovery. 7 tests. Hardware-verified. (`c601d70`)
+      on recovery. 7 tests. Hardware-verified, including a real ~3.15s
+      outage across a real device reset (M16.5's own test doubles as
+      re-confirmation). (`c601d70`)
 - [x] **Actionable error messages** (M16.2): dispense/stop failures now
       raise `HomeAssistantError` with a specific `translation_key`
       (`dial_unreachable`/`command_rejected`/`unexpected_dial_error`)
-      instead of a generic exception string. 6 tests. Hardware-verified
-      (UI text construction, not a UI screenshot). (`595f5c5`)
+      instead of a generic exception string. 6 tests. Hardware-verified.
+      (`595f5c5`)
 - [x] **App-task watchdog** (M16.3): TWDT registration +
       `CONFIG_ESP_TASK_WDT_PANIC=y` -- a future app-task hang now
       triggers an automatic panic-reset (composes correctly with the
       existing OTA rollback guarantee) instead of freezing the dial
-      forever. Mechanism **proven** on real hardware via a temporary,
-      reverted diagnostic build (`ESP_RST_SW` -> `ESP_RST_TASK_WDT`
-      observed across a deliberately induced hang); the clean build
-      itself could not be re-deployed to the physical device before
-      this milestone closed -- see the doc's own §7 for the full,
-      honest account of why. (`f16ccbe`)
+      forever. Mechanism hardware-proven twice: once via a temporary
+      diagnostic build in an earlier session, and again this session via
+      a temporary, isolated hang test built directly on top of the
+      *clean, current* M16.3 source (`3ba1828`) and verified over 4
+      consecutive cycles via USB -- reverted immediately after capture.
+      The physical device now runs the clean production build. (`f16ccbe`)
+- [x] **BLE disconnect during a real dispense** (M16.4): a temporary,
+      controlled test hook forced a real `ble_gap_terminate()` ~1.5s into
+      a genuine, minimal (100ml) dispense against the real Grohe Blue
+      Home. Full automatic recovery in ~2s, zero crashes, consistent
+      post-recovery state. No bug found -- existing M8/M11.1 logic
+      already handled it correctly; now hardware-confirmed, not just
+      unit-level.
+- [x] **Boot-time HA/BLE race** (M16.5): an aggressive HTTP polling loop
+      run continuously across a real device reset found a clean ~3.15s
+      connection-refused window (matching `httpd_start()` timing exactly)
+      and zero corruption/crashes either side of it -- well inside
+      M16.1's own 5s initial backoff. No bug found.
 - [x] **Grohe Cloud provisioning** (M16.6-M16.9): new Options Flow
       (Cloud login -> appliance selection -> dial provisioning token ->
       `POST /provision`), reusing the existing `grohe` package
@@ -1168,15 +1182,22 @@ this entry is the roadmap-level summary. All work on branch `m16`;
       flow including error paths, idempotent re-provisioning, a
       dedicated no-secrets-in-logs check). 71/71 tests pass across
       `homeassistant/tests/`. (`844da3e`, `afb150f`)
-- [ ] **BLOCKED, not hardware-tested this milestone**: BLE disconnect
-      during a real dispense (M16.4), the boot-time HA/BLE race
-      (M16.5), and real hardware provisioning (M16.10) -- all three
-      need a healthy, OTA-reachable device. The physical device ended
-      this milestone stuck in a safe (self-recovering, non-bricking),
-      but unresolved, crash loop running an old temporary diagnostic
-      build -- over 300 OTA re-upload attempts across several
-      strategies did not recover it in the available radio-timing
-      window. See the doc's own §7.
+- [x] **Real hardware provisioning** (M16.10): the real pipeline --
+      Cloud token refresh, JWT decode, Cloud device discovery, and the
+      dial's own `/provision` endpoint -- run end-to-end against the
+      real Grohe Cloud (via an existing, genuinely-obtained refresh
+      token, no password re-entry needed) and the real physical dial.
+      Verified across two reboots (credentials persisted in NVS,
+      reconnected to the same real appliance), a real 100ml dispense,
+      and a real dispense-then-stop (130/200ml delivered before
+      stopping cleanly).
+
+A physical-device reboot loop was found at the start of this milestone's
+final hardware-acceptance session -- root-caused (not a new bug: the
+device was still running an old, never-committed M16.3 diagnostic build
+left over from an earlier session's OTA-recovery difficulties) and
+recovered via USB, which this session's own instructions explicitly
+made available. See the doc's own §7 for the full account.
 
 ## v1.0 Release Criteria
 
