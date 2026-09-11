@@ -878,6 +878,35 @@ between the Cloud password, the Cloud refresh token, and the dial's own
 provisioning/API tokens; no secrets in logs, verified by a dedicated
 automated test).
 
+### Stable device identity and `via_device` linking (M15.1/M15.3)
+
+The dial's own Wi-Fi station MAC (`components/device_id/`, read via
+`esp_read_mac(mac, ESP_MAC_WIFI_STA)` -- no Wi-Fi-driver dependency,
+confirmed on real hardware to agree with `wifi_connection.cpp`'s own
+`esp_wifi_get_mac()`-based boot log line) is exposed as a `"device_id"`
+field on the existing `GET /api/status`, and used as the Home Assistant
+config entry's `unique_id` (`f"mac-{device_id}"`) instead of the dial's
+host/IP. An existing entry migrates to this in place --
+`__init__.py`'s `_async_migrate_to_stable_unique_id()` renames the
+*same* Device/Entity Registry rows (same `device.id`, same
+`entity_id`s) rather than letting HA create new ones alongside orphaned
+old ones, since `entity.py`'s own `dial_id` computation feeds both. See
+[`docs/m15_completion.md`](m15_completion.md) §1 for the full mechanism
+and why this runs from `async_setup_entry()` itself, not HA's formal
+`async_migrate_entry`.
+
+Separately, `config_flow.py`'s `GroheDialOptionsFlow` (above) now also
+persists the Cloud `appliance_id` it already fetches during
+provisioning into the config entry; `__init__.py` resolves it against
+the Device Registry (`device_registry.async_get_devices()`, searching
+across every config entry -- the target device, if any, belongs to a
+*different* integration) to a `ha-grohe_smarthome` device, if one is
+installed and owns a device for that same `appliance_id`, and links
+this dial to it via `DeviceInfo(via_device_id=...)`. Fully soft in
+every direction: no import of `ha-grohe_smarthome`'s own code, no error
+if it isn't installed, no error if the link can't be resolved -- see
+[`docs/m15_completion.md`](m15_completion.md) §3.
+
 ## MQTT / Home Assistant Discovery (M13.3, removed in M15)
 
 Implemented in M13.3: `mqtt::MqttClient` (`components/dial_mqtt/`)
@@ -1548,3 +1577,60 @@ If a future milestone's real BLE work (scanning, connecting, GATT
 discovery, reconnect/backoff) turns out not to fit cleanly into this
 shape, that's a sign the module boundary is wrong and worth revisiting
 rather than working around.
+
+### Appliance identity: address pinning and the identity probe (M15.2)
+
+Before M15.2, `HandleDiscReport()` connected to the *first* device
+advertising the Grohe service UUID -- correctness depended entirely on
+no other Grohe Blue Home ever being in range at the same time. The
+Grohe Cloud dashboard (verified by reading the real `grohe` package's
+own DTOs and the decompiled official Android app's `BlueApplianceDto`
+field list directly) carries no BLE MAC address at all, so no
+pre-connection cloud-sourced filter is possible -- the only appliance
+identity this system has anywhere is cryptographic: the appliance's own
+HMAC verification of a signed command (`response_code=1`,
+`"INVALID_HMAC"`, on a wrong key -- already proven in production by
+M13.6's dispense-failure-feedback work).
+
+- **`grohe_credentials.hpp`/`nvs_credentials_provider.cpp`**: a new
+  `PinnedApplianceAddress`, stored under its own NVS key (`appliance_addr`,
+  namespace `grohe_creds`) separate from the `{user_id,
+  pre_shared_key_base64}` blob. `NvsCredentialsProvider::Set()` --
+  unchanged call site, `/provision`'s existing handler -- now also
+  erases this key in the same NVS commit whenever new credentials are
+  stored: new credentials always invalidate any previous pin, whether
+  this is first-ever provisioning or the physical appliance being
+  replaced.
+- **`BleManager`**: `SetAddressFilter()`/`ClearAddressFilter()`/
+  `RejectCurrentPeerAndKeepScanning()`, all queue-based (mirroring
+  `command_queue_`/`command_event_`'s own cross-task discipline exactly
+  -- never touch `conn_handle_`/connection state off the host task).
+  With a filter set, `HandleDiscReport()` ignores any advertisement not
+  from that exact address, even one that also advertises the Grohe
+  service UUID. Without one (the bootstrap/unpinned state), a small,
+  session-only, never-persisted rejected-address list keeps a
+  just-failed candidate from being immediately reselected once scanning
+  resumes.
+- **`GroheClient`**: `MaybeStartIdentityProbe()`, run every `Poll()`
+  cycle once connected+subscribed+unpinned, sends one `stop()` command
+  as a probe -- the one command this protocol already lets a client
+  send with zero physical side effect. `ProcessIdentityProbeOutcome()`
+  intercepts the response before it would ever reach the public
+  `TakeCommandOutcome()` (App/DialController never know a probe
+  happened): `INVALID_HMAC` -> `RejectCurrentPeerAndKeepScanning()`;
+  anything else -> the key was genuinely verified ->
+  `SetPinnedApplianceAddress()` + `SetAddressFilter()`. Retried every
+  cycle rather than tied to the `kSubscribed` event's own single edge --
+  real hardware showed that event can fire before SNTP has finished
+  syncing, which would otherwise fail the probe's own `BuildStopPayload()`
+  (M9's "no command without a valid clock" rule) and never pin an
+  entirely legitimate appliance for the rest of that connection.
+
+Hardware-verified end to end, including the rejection path: a real,
+deliberately-corrupted pre-shared key made the real, only-available
+Grohe Blue Home genuinely return `INVALID_HMAC`, which the dial
+correctly rejected, disconnected from, and never reselected for the
+remainder of that boot. See
+[`docs/m15_completion.md`](m15_completion.md) §2 for the full evidence
+and why that substitutes validly for a true two-physical-appliance
+test.

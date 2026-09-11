@@ -183,6 +183,8 @@ the reasoning behind every non-obvious decision live in
 | HA connection retry/backoff, actionable error messages | ✅ Hardware-validated |
 | App-task watchdog (hang → automatic reset) | ✅ Hardware-validated |
 | Grohe Cloud provisioning from Home Assistant | ✅ Hardware-validated |
+| Stable, MAC-based Home Assistant identity | ✅ Hardware-validated (firmware); automated-tested (HA-side migration) |
+| Multi-appliance BLE disambiguation (cryptographic pinning) | ✅ Hardware-validated, including a real rejection of a wrong-credentialed appliance |
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the complete milestone-by-milestone
 history, and its "v1.0 Release Criteria" section for what "done" means for
@@ -259,14 +261,21 @@ Implemented:
       (reusing the existing `grohe` Python package, no separate Grohe
       Cloud API implementation) and provisions the dial directly, no
       manual `scripts/provision.sh` step needed
+- [x] Stable, MAC-based Home Assistant device identity — survives a
+      DHCP/IP change (existing installations migrate in place, no
+      re-add); an optional `via_device` link to a matching
+      `ha-grohe_smarthome` device, when one exists
+- [x] Robust multi-appliance BLE disambiguation — the dial cryptographically
+      verifies (one harmless probe, the appliance's own HMAC check) and
+      pins the specific Grohe Blue Home it was provisioned for, never
+      just the first one it happens to see; hardware-verified including
+      a real rejection of a wrong-credentialed appliance
 
 Known limitations, not planned work:
 
 - CO₂/filter/consumables status is never available — the dial's BLE link
   to the appliance doesn't carry it (cloud-only on Grohe's side), so no
   amount of firmware work exposes it
-- The Home Assistant integration identifies the dial by its host/IP, not
-  a stable hardware identity; a dial that changes IP needs to be re-added
 
 </details>
 
@@ -283,7 +292,7 @@ Known limitations, not planned work:
 | Firmware version/build metadata | ✅ Shipped |
 | OTA firmware updates (Wi-Fi, plain HTTP + shared secret) | ✅ Shipped |
 | Debugging & flashing tooling | 🔜 Optional, not required for v1.0 |
-| Local HTTP API + native Home Assistant integration (M15) | ✅ Shipped |
+| Local HTTP API + native Home Assistant integration (M15) | ✅ Shipped — see [`docs/m15_completion.md`](docs/m15_completion.md) for its final three items |
 | HA reliability hardening + Grohe Cloud provisioning (M16) | ✅ Shipped — see [`docs/m16_reliability_and_provisioning.md`](docs/m16_reliability_and_provisioning.md) |
 
 [`docs/ROADMAP.md`](docs/ROADMAP.md) is organized as one section per

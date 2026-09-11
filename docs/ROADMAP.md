@@ -1115,18 +1115,35 @@ Home Assistant -> Grohe Dial HA Integration -> local HTTP -> Grohe Dial -> BLE -
       repeatedly again during M16's own interactive deployment steps --
       see M14's own updated entry above for the one caveat M16 found
       (boot-time radio contention, not this upload path itself).
-- [ ] **Still deferred, not a blocker**: `via_device` device linking, the
-      dial's stable MAC-based `unique_id` (host/IP used instead today),
-      multi-appliance BLE disambiguation. Cloud login itself was added in
-      M16 (`homeassistant/custom_components/grohe_dial/cloud.py`), but
-      only for one-shot BLE-credential *provisioning* -- not the ongoing
-      Cloud-linked device model this bullet originally meant, which
-      remains undone. CO₂/filter/consumables are a hard architectural
+- [x] **Closed**: `via_device` device linking, a stable MAC-based
+      `unique_id`, and multi-appliance BLE disambiguation -- the three
+      items this bullet used to defer. Full detail, evidence, and the
+      exact test/hardware results live in
+      [`docs/m15_completion.md`](m15_completion.md); summary: a new
+      `components/device_id/` exposes the dial's Wi-Fi MAC over the
+      existing `GET /api/status`, used as `unique_id` directly for new
+      HA entries and migrated in place (same device/entity registry
+      rows, same `entity_id`s) for existing ones; a persisted,
+      cryptographically-verified BLE address pin (one harmless `stop()`
+      probe, the appliance's own HMAC verification is the identity
+      proof) replaces "first service-UUID match" for BLE connection,
+      hardware-verified including a real rejection of a
+      wrong-credentialed appliance using the real Grohe Blue Home's own
+      HMAC check (no second physical appliance was available, or
+      needed -- see that doc's own §2 for why the substitution is
+      valid); `via_device_id` links to a matching `ha-grohe_smarthome`
+      device when the Cloud `appliance_id` from M16's own provisioning
+      flow is known and that integration is installed, fully optional
+      otherwise. CO₂/filter/consumables remain a hard architectural
       boundary, not a deferred feature -- the dial's BLE link to the
       Grohe Blue Home never carries that data.
 
 Committed as four commits, all merged to `main` (`bb10480`, `d8ff91c`,
-`141db73`, `57d2b7e`), M14 (`c31058a`) unchanged as their ancestor.
+`141db73`, `57d2b7e`), M14 (`c31058a`) unchanged as their ancestor. The
+three items above closed later, on `feature/m15-completion`, once M16
+had already closed -- see that branch's own commits and
+[`docs/m15_completion.md`](m15_completion.md) for the full account of
+why M15 stayed open that long.
 
 ### M16 — Reliability Hardening + Grohe Blue Provisioning ✅
 
@@ -1243,15 +1260,17 @@ below links to the milestone(s) that are its evidence.
       just in principle.
 - [x] No known **critical** defects. Known, non-critical limitations are
       tracked, not hidden: OTA's boot-time-radio-contention edge case
-      (above, USB fallback always available), the dial's host/IP-based
-      (not MAC-based) `unique_id`, no `via_device` HA linking, no
-      multi-appliance BLE disambiguation, and the hard architectural
+      (above, USB fallback always available), and the hard architectural
       boundary that CO₂/filter/consumables data is Cloud-only and never
-      reaches this BLE-only firmware. None of these affect core dispense/
-      stop/BLE/UI reliability, which M0-M16's hardware acceptance
-      consistently found solid.
+      reaches this BLE-only firmware. The dial's `unique_id`, appliance
+      identity, and optional `via_device` linking -- all listed here as
+      limitations until M15's own completion -- are resolved; see
+      [`docs/m15_completion.md`](m15_completion.md). None of the
+      remaining items affect core dispense/stop/BLE/UI reliability,
+      which M0-M16's hardware acceptance consistently found solid.
 - [x] Complete documentation. `README.md`, `docs/ARCHITECTURE.md`,
       `docs/ROADMAP.md` (this file), `docs/m15_ha_integration.md`,
+      `docs/m15_completion.md`,
       `docs/m16_reliability_and_provisioning.md`, `docs/ui/*`,
       `SECURITY.md`, and `hardware/enclosure/` together cover the
       protocol, firmware architecture, every milestone's own evidence,
