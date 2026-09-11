@@ -257,6 +257,10 @@ BleManager::~BleManager() {
     vQueueDelete(command_queue_);
     command_queue_ = nullptr;
   }
+  if (filter_command_queue_ != nullptr) {
+    vQueueDelete(filter_command_queue_);
+    filter_command_queue_ = nullptr;
+  }
   if (instance_ == this) {
     instance_ = nullptr;
   }
@@ -297,6 +301,16 @@ esp_err_t BleManager::Init() {
     return ESP_ERR_NO_MEM;
   }
 
+  // M15.2: depth 1 + xQueueOverwrite (see filter_command_queue_'s own
+  // comment) -- only the latest desired filter state is ever meaningful,
+  // so a full queue is never a real failure mode the way command_queue_
+  // filling up would be.
+  filter_command_queue_ = xQueueCreate(1, sizeof(FilterCommand));
+  if (filter_command_queue_ == nullptr) {
+    ESP_LOGE(kTag, "xQueueCreate (filter command) failed");
+    return ESP_ERR_NO_MEM;
+  }
+
   instance_ = this;
   SetState(BleState::kInitializing);
 
@@ -314,6 +328,7 @@ esp_err_t BleManager::Init() {
   // this one just wasn't obviously a NimBLE call by name.
   ble_npl_event_init(&command_event_, &BleManager::OnCommandEvent, this);
   ble_npl_event_init(&reconnect_event_, &BleManager::OnReconnectEvent, this);
+  ble_npl_event_init(&filter_command_event_, &BleManager::OnFilterCommandEvent, this);
 
   const esp_timer_create_args_t backoff_timer_args = {
       .callback = &BleManager::OnBackoffTimer,
@@ -398,6 +413,121 @@ esp_err_t BleManager::WriteCharacteristic(uint16_t val_handle,
   // task.
   ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &command_event_);
   return ESP_OK;
+}
+
+namespace {
+[[nodiscard]] bool AddressesEqual(const ble_addr_t& a, const ble_addr_t& b) {
+  return a.type == b.type && std::memcmp(a.val, b.val, sizeof(a.val)) == 0;
+}
+}  // namespace
+
+void BleManager::SetAddressFilter(const ble_addr_t& address) {
+  if (filter_command_queue_ == nullptr) {
+    return;
+  }
+  const FilterCommand cmd{FilterCommandKind::kSetFilter, address};
+  xQueueOverwrite(filter_command_queue_, &cmd);
+  ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &filter_command_event_);
+}
+
+void BleManager::ClearAddressFilter() {
+  if (filter_command_queue_ == nullptr) {
+    return;
+  }
+  const FilterCommand cmd{FilterCommandKind::kClearFilter, {}};
+  xQueueOverwrite(filter_command_queue_, &cmd);
+  ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &filter_command_event_);
+}
+
+void BleManager::RejectCurrentPeerAndKeepScanning() {
+  if (filter_command_queue_ == nullptr) {
+    return;
+  }
+  const FilterCommand cmd{FilterCommandKind::kReject, {}};
+  xQueueOverwrite(filter_command_queue_, &cmd);
+  ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &filter_command_event_);
+}
+
+void BleManager::OnFilterCommandEvent(struct ble_npl_event* /*event*/) {
+  // Resolved via instance_, not the event's own arg -- same discipline as
+  // every other callback in this class.
+  if (instance_ == nullptr) {
+    return;
+  }
+  instance_->HandleFilterCommandEvent();
+}
+
+void BleManager::HandleFilterCommandEvent() {
+  FilterCommand cmd{};
+  if (xQueuePeek(filter_command_queue_, &cmd, 0) != pdTRUE) {
+    return;
+  }
+  // Peek, not receive: this is a depth-1 "latest desired state" slot
+  // (see its own comment), not a work queue to drain -- leaving it
+  // populated means a second HandleFilterCommandEvent() call before a
+  // third SetAddressFilter()/ClearAddressFilter()/
+  // RejectCurrentPeerAndKeepScanning() call (e.g. a stray wakeup) just
+  // reapplies the same state, harmlessly.
+  switch (cmd.kind) {
+    case FilterCommandKind::kSetFilter: {
+      char addr_str[kAddrStrSize];
+      FormatAddr(cmd.address, addr_str, sizeof(addr_str));
+      ESP_LOGI(kTag, "M15.2: address filter set to %s -- only this "
+               "appliance will be (re)connected to from now on", addr_str);
+      has_address_filter_ = true;
+      address_filter_ = cmd.address;
+      break;
+    }
+    case FilterCommandKind::kClearFilter:
+      ESP_LOGI(kTag, "M15.2: address filter cleared -- back to "
+               "first-service-UUID-match bootstrap discovery");
+      has_address_filter_ = false;
+      address_filter_ = {};
+      break;
+    case FilterCommandKind::kReject:
+      if (state_ == BleState::kConnected ||
+          state_ == BleState::kDiscoveringServices ||
+          state_ == BleState::kReadyForProtocol) {
+        char addr_str[kAddrStrSize];
+        FormatAddr(device_addr_, addr_str, sizeof(addr_str));
+        ESP_LOGW(kTag, "M15.2: rejecting connected peer %s -- failed "
+                 "identity probe", addr_str);
+        RememberRejectedAddress(device_addr_);
+        ble_gap_terminate(conn_handle_, BLE_ERR_REM_USER_CONN_TERM);
+        // FailConnection() (via the resulting HandleDisconnect()) takes
+        // it from here -- same reconnect/backoff path a real link loss
+        // already uses, see RejectCurrentPeerAndKeepScanning()'s own
+        // comment.
+      } else {
+        ESP_LOGD(kTag, "M15.2: reject requested but not connected to "
+                 "anyone (state=%s) -- nothing to do", ToString(state_));
+      }
+      break;
+  }
+}
+
+bool BleManager::IsRejectedAddress(const ble_addr_t& address) const {
+  for (size_t i = 0; i < rejected_address_count_; ++i) {
+    if (AddressesEqual(rejected_addresses_[i], address)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void BleManager::RememberRejectedAddress(const ble_addr_t& address) {
+  if (IsRejectedAddress(address)) {
+    return;
+  }
+  if (rejected_address_count_ < kRejectedAddressCapacity) {
+    rejected_addresses_[rejected_address_count_++] = address;
+    return;
+  }
+  // Full: oldest-first eviction -- see kRejectedAddressCapacity's own
+  // comment on why that's an acceptable, not a concerning, trade-off.
+  std::memmove(&rejected_addresses_[0], &rejected_addresses_[1],
+              sizeof(ble_addr_t) * (kRejectedAddressCapacity - 1));
+  rejected_addresses_[kRejectedAddressCapacity - 1] = address;
 }
 
 void BleManager::SetState(BleState state) {
@@ -613,6 +743,26 @@ void BleManager::HandleDiscReport(const struct ble_gap_disc_desc& disc) {
     return;
   }
 
+  // M15.2: with a pinned appliance address (the steady state once one
+  // has been cryptographically verified -- see grohe_client.hpp's own
+  // comment), any advertisement from a *different* address is not a
+  // candidate at all, regardless of it also advertising the Grohe
+  // service UUID -- this is the actual "never connect to the wrong
+  // nearby Grohe Blue Home" enforcement point. Without a filter set
+  // (bootstrap/provisioning state), only the session-local reject
+  // blacklist applies, so a candidate that already failed an identity
+  // probe this boot isn't immediately reselected the moment scanning
+  // resumes after RejectCurrentPeerAndKeepScanning() disconnects it.
+  if (has_address_filter_ && !AddressesEqual(disc.addr, address_filter_)) {
+    ESP_LOGD(kTag, "ignoring non-pinned Grohe-service-UUID advertiser "
+             "addr=%s", addr_str);
+    return;
+  }
+  if (!has_address_filter_ && IsRejectedAddress(disc.addr)) {
+    ESP_LOGD(kTag, "ignoring already-rejected candidate addr=%s", addr_str);
+    return;
+  }
+
   // Stop scanning before anything else, so the window in which further
   // reports can arrive is as short as possible.
   const int cancel_rc = ble_gap_disc_cancel();
@@ -633,7 +783,7 @@ void BleManager::HandleDiscReport(const struct ble_gap_disc_desc& disc) {
   ESP_LOGI(kTag, "Grohe Blue discovered: addr=%s (%s) rssi=%d name='%s'",
            found_addr, AddrTypeToString(device_addr_.type), disc.rssi, name);
 
-  Enqueue(BleEvent{BleEventType::kDeviceFound});
+  Enqueue(BleEvent{BleEventType::kDeviceFound, 0, device_addr_});
 
   if (Connect() != ESP_OK) {
     // Connect() has already logged the specific failure and called

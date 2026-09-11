@@ -17,6 +17,37 @@ CONF_API_TOKEN = "api_token"
 DEFAULT_PORT = 8080
 DEFAULT_SCAN_INTERVAL_SECONDS = 10
 
+# M15.1: prefix marking a config entry's unique_id as the stable,
+# hardware-derived (MAC-based) form rather than the original host/IP one
+# -- see __init__.py's _async_migrate_to_stable_unique_id() for the
+# migration this enables and config_flow.py's own use of it for brand
+# new entries. Lives here (not in __init__.py, where it was first added)
+# so config_flow.py can share the exact same value without a circular
+# import between the two.
+STABLE_UNIQUE_ID_PREFIX = "mac-"
+
+# M15.3: entry.data key for the Grohe Cloud appliance_id this dial was
+# provisioned against (config_flow.py's GroheDialOptionsFlow) -- not a
+# secret, the same kind of identifier ha-grohe_smarthome's own device
+# registry entry is already keyed by (see __init__.py's own
+# via_device_id resolution). Absent from entry.data entirely for a dial
+# that has never been provisioned through this integration's own Options
+# Flow (e.g. scripts/provision.sh was used directly instead) -- that
+# dial simply never gets a via_device link, same as
+# ha-grohe_smarthome not being installed at all.
+CONF_GROHE_APPLIANCE_ID = "grohe_appliance_id"
+
+# M15.3: the domain string github.com/Flo-Schilli/ha-grohe_smarthome's
+# own const.py hardcodes for its DOMAIN -- verified by reading that
+# integration's real source directly (entities/entity/sensor.py's own
+# DeviceInfo(identifiers={(self._domain, self._device.appliance_id)}),
+# constructed with domain=DOMAIN='grohe_smarthome' at every call site),
+# not guessed. A third-party integration's own domain, not something
+# this project owns or can change if it's ever renamed -- see
+# __init__.py's own via_device_id resolution for how a stale/absent
+# match degrades gracefully rather than erroring.
+GROHE_SMARTHOME_DOMAIN = "grohe_smarthome"
+
 # HTTP header the firmware's /api/* endpoints require -- see
 # provisioning_server.cpp's kApiAuthHeader.
 API_TOKEN_HEADER = "X-Api-Token"

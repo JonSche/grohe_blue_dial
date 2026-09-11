@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "cJSON.h"
+#include "device_id/device_id.hpp"
 #include "esp_log.h"
 #include "mem_diag/mem_diag.hpp"
 
@@ -529,6 +530,20 @@ esp_err_t ProvisioningServer::HandleApiStatusGet(httpd_req_t* req) {
   cJSON_AddItemToObject(root, "active_dispense_amount_ml",
                         cJSON_CreateNumber(status.active_dispense_amount_ml));
   cJSON_AddItemToObject(root, "delivered_ml", cJSON_CreateNumber(status.delivered_ml));
+
+  // M15.1: a stable, hardware-derived identity for the Home Assistant
+  // integration to key its unique_id/device-registry entry on, instead
+  // of this dial's host/IP (see device_id.hpp's own comment on why).
+  // Added to this already-authenticated, already-polled endpoint rather
+  // than a new one -- see docs/m15_completion.md's own reasoning.
+  // Omitted (not an empty string) on the rare failure of the
+  // underlying efuse read, so an older HA integration talking to this
+  // field for the first time sees "key absent", not "key present but
+  // empty" -- a cleaner signal for api.py's own optional-field handling.
+  char device_id_str[device_id::kMacStrSize];
+  if (device_id::StationMacString(device_id_str, sizeof(device_id_str))) {
+    cJSON_AddItemToObject(root, "device_id", cJSON_CreateString(device_id_str));
+  }
 
   cJSON* appliance_response = cJSON_CreateObject();
   cJSON_AddItemToObject(appliance_response, "received",

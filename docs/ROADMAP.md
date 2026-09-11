@@ -1,9 +1,9 @@
 # Roadmap
 
-Milestones for Grohe Dial. The Grohe Blue BLE contract (M3–M9), the core
-dispense experience (M11), water-type support (M10), and Wi-Fi OTA
-updates (M12) are implemented and hardware-validated; the remaining
-milestone (M13) extends product scope on top of that foundation.
+Milestones for Grohe Dial. M0 through M16 are all implemented and
+hardware-validated -- see each milestone's own section below for its
+scope and evidence, and the "v1.0 Release Criteria" section near the end
+for what "done" means for this project as a whole.
 
 ## M0 — Raw hardware bring-up ✅
 
@@ -1115,18 +1115,58 @@ Home Assistant -> Grohe Dial HA Integration -> local HTTP -> Grohe Dial -> BLE -
       repeatedly again during M16's own interactive deployment steps --
       see M14's own updated entry above for the one caveat M16 found
       (boot-time radio contention, not this upload path itself).
-- [ ] **Still deferred, not a blocker**: `via_device` device linking, the
-      dial's stable MAC-based `unique_id` (host/IP used instead today),
-      multi-appliance BLE disambiguation. Cloud login itself was added in
-      M16 (`homeassistant/custom_components/grohe_dial/cloud.py`), but
-      only for one-shot BLE-credential *provisioning* -- not the ongoing
-      Cloud-linked device model this bullet originally meant, which
-      remains undone. CO₂/filter/consumables are a hard architectural
-      boundary, not a deferred feature -- the dial's BLE link to the
-      Grohe Blue Home never carries that data.
+- [x] **Closed**: `via_device` device linking, a stable MAC-based
+      `unique_id`, and multi-appliance BLE disambiguation -- the three
+      items this bullet used to defer. Full detail, evidence, and the
+      exact test/hardware results live in
+      [`docs/m15_completion.md`](m15_completion.md); summary: a new
+      `components/device_id/` exposes the dial's Wi-Fi MAC over the
+      existing `GET /api/status`, used as `unique_id` directly for new
+      HA entries and migrated in place (same device/entity registry
+      rows, same `entity_id`s) for existing ones; a persisted,
+      cryptographically-verified BLE address pin (one harmless `stop()`
+      probe, the appliance's own HMAC verification is the identity
+      proof) replaces "first service-UUID match" for BLE connection,
+      hardware-verified including a real rejection of a
+      wrong-credentialed appliance using the real Grohe Blue Home's own
+      HMAC check (no second physical appliance was available, or
+      needed -- see that doc's own §2 for why the substitution is
+      valid); the device/`via_device` link to a matching
+      `ha-grohe_smarthome` device is resolved when the Cloud
+      `appliance_id` from M16's own provisioning flow is known and that
+      integration is installed, fully optional otherwise. CO₂/filter/
+      consumables remain a hard architectural boundary, not a deferred
+      feature -- the dial's BLE link to the Grohe Blue Home never
+      carries that data.
+- [x] **Real Home Assistant instance deployment verification**: all
+      three items above were re-verified against the project's actual,
+      already-running Home Assistant install (not just the newer pinned
+      test dependency) -- surfacing and fixing four real compatibility
+      bugs that instance's own, older HA version and its own pinned
+      `grohe` package version exposed (`DeviceRegistry.async_get_devices()`
+      absent, a self-healing gap in the M15.1 migration, a missing
+      `grohe.exceptions` module against the real, shared `grohe==0.2.4`
+      dependency, and a `via_device_id`/`via_device` incompatibility that
+      broke every entity at startup). Full account, root cause, fix, and
+      evidence for each in [`docs/m15_completion.md`](m15_completion.md)
+      §5. Closed with a genuine, hardware-verified acceptance test: a
+      real `grohe_dial.dispense` and `grohe_dial.stop`, both invoked
+      through Home Assistant's own Developer Tools service-call UI (not
+      the dial's HTTP API directly, not a mock), reaching the real Grohe
+      Blue Home over BLE -- confirmed via the recorder DB (a real
+      `dispensing` → `stopping` → `idle` transition, delivered amount
+      rising then halting early on `stop`) and the dial's own
+      `appliance_response: {received: true, success: true}`, with zero
+      HA log lines (no errors, no BLE disconnect, no reboot) during the
+      entire test window.
 
 Committed as four commits, all merged to `main` (`bb10480`, `d8ff91c`,
-`141db73`, `57d2b7e`), M14 (`c31058a`) unchanged as their ancestor.
+`141db73`, `57d2b7e`), M14 (`c31058a`) unchanged as their ancestor. The
+three items above, plus the real-HA-instance verification pass, closed
+later on `feature/m15-completion`, once M16 had already closed, and were
+merged to `main` once M15 was fully complete -- see that branch's own
+commits and [`docs/m15_completion.md`](m15_completion.md) for the full
+account of why M15 stayed open that long.
 
 ### M16 — Reliability Hardening + Grohe Blue Provisioning ✅
 
@@ -1243,15 +1283,21 @@ below links to the milestone(s) that are its evidence.
       just in principle.
 - [x] No known **critical** defects. Known, non-critical limitations are
       tracked, not hidden: OTA's boot-time-radio-contention edge case
-      (above, USB fallback always available), the dial's host/IP-based
-      (not MAC-based) `unique_id`, no `via_device` HA linking, no
-      multi-appliance BLE disambiguation, and the hard architectural
+      (above, USB fallback always available), and the hard architectural
       boundary that CO₂/filter/consumables data is Cloud-only and never
-      reaches this BLE-only firmware. None of these affect core dispense/
-      stop/BLE/UI reliability, which M0-M16's hardware acceptance
-      consistently found solid.
+      reaches this BLE-only firmware. The dial's `unique_id`, appliance
+      identity, and optional `via_device` linking -- all listed here as
+      limitations until M15's own completion -- are resolved, and
+      re-verified against the project's actual, live Home Assistant
+      instance (not just the pinned test dependency), including a real
+      `grohe_dial.dispense`/`grohe_dial.stop` invoked through HA's own
+      service mechanism; see
+      [`docs/m15_completion.md`](m15_completion.md). None of the
+      remaining items affect core dispense/stop/BLE/UI reliability,
+      which M0-M16's hardware acceptance consistently found solid.
 - [x] Complete documentation. `README.md`, `docs/ARCHITECTURE.md`,
       `docs/ROADMAP.md` (this file), `docs/m15_ha_integration.md`,
+      `docs/m15_completion.md`,
       `docs/m16_reliability_and_provisioning.md`, `docs/ui/*`,
       `SECURITY.md`, and `hardware/enclosure/` together cover the
       protocol, firmware architecture, every milestone's own evidence,

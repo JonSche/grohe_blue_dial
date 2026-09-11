@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from grohe.dto.grohe_dto import GroheTokensDTO
 from grohe.exceptions import GroheNetworkError, GroheUnauthorizedError
@@ -18,6 +19,7 @@ from grohe.exceptions import GroheNetworkError, GroheUnauthorizedError
 from custom_components.grohe_dial.cloud import (
     GroheCloudAuthError,
     GroheCloudConnectionError,
+    GroheCloudError,
     list_appliances,
     login_with_credentials,
     refresh_tokens,
@@ -69,6 +71,59 @@ async def test_login_when_cloud_unavailable_raises_connection_error() -> None:
     ):
         with pytest.raises(GroheCloudConnectionError):
             await login_with_credentials("user@example.com", "irrelevant")
+
+
+# grohe < 0.3.0 (a real, currently-deployed dependency conflict found
+# deploying this integration to a real Home Assistant instance sharing
+# its Python environment with another, unrelated integration pinned to
+# grohe==0.2.4 -- see cloud.py's own header/import comment) has no
+# grohe.exceptions module at all; GroheTokens.get_tokens_from_credentials()/
+# get_refresh_tokens() raise httpx's own exceptions, or a bare Exception,
+# directly instead. These three tests exercise _wrap()'s own fallback
+# classification for exactly that shape -- deliberately using real
+# httpx/Exception instances, not grohe.exceptions ones, regardless of
+# which grohe version this suite's own pinned test dependency actually
+# has (the fallback branches only run if the *structured* isinstance
+# checks above them didn't already match, which a plain httpx/Exception
+# instance never does either way).
+async def test_login_with_httpx_401_raises_auth_error() -> None:
+    request = httpx.Request("POST", "https://idp2-apigw.cloud.grohe.com/v3/iot/oidc/login")
+    response = httpx.Response(401, request=request)
+    with patch(
+        "custom_components.grohe_dial.cloud.GroheTokens.get_tokens_from_credentials",
+        new=AsyncMock(
+            side_effect=httpx.HTTPStatusError("401", request=request, response=response)
+        ),
+    ):
+        with pytest.raises(GroheCloudAuthError):
+            await login_with_credentials("user@example.com", "wrong")
+
+
+async def test_login_with_httpx_connection_error_raises_connection_error() -> None:
+    with patch(
+        "custom_components.grohe_dial.cloud.GroheTokens.get_tokens_from_credentials",
+        new=AsyncMock(side_effect=httpx.ConnectError("connection refused")),
+    ):
+        with pytest.raises(GroheCloudConnectionError):
+            await login_with_credentials("user@example.com", "irrelevant")
+
+
+async def test_login_with_unstructured_exception_raises_generic_cloud_error() -> None:
+    """grohe==0.2.4's own real, installed source raises exactly this
+    shape (a bare Exception, not an httpx one) for invalid credentials
+    specifically -- not distinguishable from a handful of other
+    malformed-response cases at that version, so this is deliberately
+    generic (GroheCloudError / "unknown"), not misclassified as
+    GroheCloudAuthError by guessing at the message text."""
+    with patch(
+        "custom_components.grohe_dial.cloud.GroheTokens.get_tokens_from_credentials",
+        new=AsyncMock(
+            side_effect=Exception("Invalid username/password or unexpected response from Grohe service")
+        ),
+    ):
+        with pytest.raises(GroheCloudError) as exc_info:
+            await login_with_credentials("user@example.com", "wrong")
+        assert not isinstance(exc_info.value, (GroheCloudAuthError, GroheCloudConnectionError))
 
 
 async def test_refresh_tokens_success() -> None:

@@ -125,6 +125,18 @@ Both services were exercised for real against the physical dial through a real H
 
 ### 4.4 Cloud login / Grohe Blue linking — NOT IMPLEMENTED, deliberately deferred
 
+> **Update — since resolved.** The `via_device` link and the stable
+> MAC-based `unique_id` this section describes as deferred were both
+> implemented, hardware-tested (including against the project's own live
+> Home Assistant instance), and closed on `feature/m15-completion`. See
+> [`docs/m15_completion.md`](m15_completion.md) for the full account. The
+> analysis below is left as-written — it's what M15 actually shipped with at
+> the time, and the reasoning for staying local-only (no `ha-grohe_smarthome`
+> fork) still held for how the eventual link was implemented: a soft,
+> optional Device Registry link using the Cloud `appliance_id` this
+> integration's own provisioning flow already fetches, not a fork or
+> extension of that integration.
+
 This milestone does not implement Cloud login or `ha-grohe_smarthome` linking — the local-only Config Flow (host/port/API token, §4.1) is the deliberate, permanent architecture for *this* integration, not a placeholder. A dedicated architecture review (post-M15, before this documentation update) explicitly evaluated forking/extending `ha-grohe_smarthome` to add the dial as a second device type and concluded **against** it for now: that project's device model, discovery, and coordinator are all built around its cloud API client (`iot_class: cloud_polling`, devices enumerated from a cloud dashboard call, `GroheTypes` sourced from an external PyPI package) — the dial has no cloud registration at all, so almost nothing would actually be reusable, and a fork would mean carrying an entire unrelated cloud-integration codebase for near-zero shared code. **Not an M15 blocker** — a possible future direction, not started, not required for M15 or any planned M16 work.
 
 Two concrete, known limitations as a result of staying local-only:
@@ -227,11 +239,11 @@ All values 0 crashes, reproducible across repeated boots. **M14's own RAM optimi
 
 These are **not** gaps in M15's testing — they are deliberate scope boundaries, unaffected by hardware acceptance:
 
-- **Cloud login / `ha-grohe_smarthome` fork or extension** (§4.4) — deliberately deferred, not started. A dedicated architecture review considered forking/extending `ha-grohe_smarthome` and recommended against it for now (see §4.4) — a possible future direction, **not an M15 blocker**, not planned for M16 either unless separately decided.
-- **`via_device` Grohe Blue ↔ Dial linking** — blocked on the above.
-- **Dial's stable MAC-based `unique_id`** — deferred; host/IP used instead (§4.4, point 2).
-- **CO₂/filter/consumables** — a known technical boundary of the architecture, not a missing feature: the dial's BLE connection to the Grohe Blue Home never carries this data (cloud-only, confirmed against the GroheWatersystems decompilation, §3), so the local HTTP API has nothing to expose here regardless of implementation effort. Would require the cloud-login work above to ever become available.
-- **Multi-appliance BLE disambiguation** (derived device name from serial number) — not implemented; today's single-appliance service-UUID-only match is unchanged.
+- **Cloud login / `ha-grohe_smarthome` fork or extension** (§4.4) — deliberately deferred, not started at the time. A dedicated architecture review considered forking/extending `ha-grohe_smarthome` and recommended against it for now (see §4.4) — a possible future direction, **not an M15 blocker**, not planned for M16 either unless separately decided. (M16 did later add a *local* Cloud-login-assisted provisioning flow for BLE credentials — see `docs/m16_reliability_and_provisioning.md` — without forking or depending on `ha-grohe_smarthome`, consistent with this recommendation.)
+- **`via_device` Grohe Blue ↔ Dial linking** — was blocked on the above. **Since resolved** — see §4.4's own update note and [`docs/m15_completion.md`](m15_completion.md) §3/§5.
+- **Dial's stable MAC-based `unique_id`** — was deferred; host/IP used instead (§4.4, point 2). **Since resolved** — see [`docs/m15_completion.md`](m15_completion.md) §1/§5.
+- **CO₂/filter/consumables** — a known technical boundary of the architecture, not a missing feature: the dial's BLE connection to the Grohe Blue Home never carries this data (cloud-only, confirmed against the GroheWatersystems decompilation, §3), so the local HTTP API has nothing to expose here regardless of implementation effort. Unaffected by the cloud-login-assisted *provisioning* work M16 later added — that fetches BLE credentials once, it doesn't add a live Cloud data channel.
+- **Multi-appliance BLE disambiguation** (derived device name from serial number) — was not implemented; single-appliance service-UUID-only match. **Since resolved**, via a different mechanism than "derived device name from serial number": a persisted, cryptographically-verified BLE address pin (the appliance's own HMAC verification is the identity proof, not its name). See [`docs/m15_completion.md`](m15_completion.md) §2.
 - **Real `POST /ota` firmware-upload path** — routing and `GET /version` are hardware-verified (§6b); an actual upload exercising `esp_ota_write()` was not performed this milestone. Explicitly out of M15's core scope (local HTTP API + HA integration), not a blocker.
 
 ## 9. Git

@@ -58,8 +58,15 @@ class GroheClient {
   // (grohe_ble::LocalCredentialsProvider or the NVS-backed
   // grohe_ble::NvsCredentialsProvider) this client actually uses, the
   // same shape as every other injected dependency in this codebase.
+  // Non-const as of M15.2 (was `const CredentialsProvider&` through
+  // M13.1-M16): ProcessIdentityProbeOutcome() below needs to call the
+  // mutating SetPinnedApplianceAddress() on this exact same instance
+  // app::App's provisioning path (components/provisioning/) already
+  // mutates via Set()/Clear() -- both are the *same* trust boundary
+  // (see grohe_credentials.hpp's own comment on why Set() itself clears
+  // the pin), just written from two different tasks/call sites.
   GroheClient(time_service::WifiConnection& wifi_connection,
-             const CredentialsProvider& credentials_provider);
+             CredentialsProvider& credentials_provider);
 
   esp_err_t Init();
 
@@ -93,19 +100,67 @@ class GroheClient {
   [[nodiscard]] bool HasValidTime() const { return time_provider_.IsValid(); }
 
  private:
-  enum class PendingCommand { kNone, kDispense, kStop };
+  // M15.2: kIdentityProbe is SendCommand()'s third kind -- a stop()
+  // command sent automatically, internally, never by a caller (see
+  // MaybeStartIdentityProbe()). Deliberately reuses stop(): it's the one
+  // command this protocol already lets a client send speculatively with
+  // zero physical side effect ("either does nothing, if nothing's
+  // dispensing, or stops an in-progress dispense -- never starts one"),
+  // so a probe can never itself cause water to flow -- and the
+  // appliance's own HMAC verification of it is exactly the one
+  // cryptographic identity check this protocol actually offers (see
+  // this class's own comment above). Its outcome is intercepted and
+  // consumed entirely inside ProcessIdentityProbeOutcome() -- never
+  // surfaced through the public TakeCommandOutcome(), so App/
+  // DialController never even know a probe happened.
+  enum class PendingCommand { kNone, kDispense, kStop, kIdentityProbe };
 
-  // Shared by RequestDispense()/RequestStop(): builds and sends the given
-  // command's payload, and if the write is successfully queued, records
-  // pending_command_ and the ApplianceState sequence at that moment (the
-  // baseline TakeCommandOutcome() compares against). amount_ml/taste are
-  // meaningless for kStop (BuildStopPayload() ignores them).
+  // Shared by RequestDispense()/RequestStop()/MaybeStartIdentityProbe():
+  // builds and sends the given command's payload, and if the write is
+  // successfully queued, records pending_command_ and the ApplianceState
+  // sequence at that moment (the baseline TakeCommandOutcome()/
+  // ProcessIdentityProbeOutcome() compares against). amount_ml/taste are
+  // meaningless for kStop/kIdentityProbe (BuildStopPayload() ignores
+  // them).
   [[nodiscard]] bool SendCommand(PendingCommand kind, int amount_ml,
                                  WaterType taste);
 
+  // M15.2: called on every Poll() cycle once ready_for_protocol_ and
+  // subscribed_ are both true (not just once, on the kSubscribed event
+  // itself -- real-hardware evidence found the connection can reach
+  // that point before SNTP has synced, which fails the one-shot attempt
+  // an earlier version of this method made; see grohe_client.cpp's own
+  // comment) -- a no-op unless credentials_provider_ has no pinned
+  // appliance address yet (the bootstrap state; see
+  // grohe_credentials.hpp's own comment on PinnedApplianceAddress) and
+  // no probe is already in flight, in which case it (re-)attempts
+  // exactly one kIdentityProbe SendCommand(kStop, ...) -- there is at
+  // most ever one in-flight command of any kind (the same invariant
+  // SendCommand() already enforces for RequestDispense()/RequestStop()),
+  // so this and a real user command can never race.
+  void MaybeStartIdentityProbe();
+
+  // M15.2: called at the end of every Poll(), after
+  // PollCharacteristicEvents() has had a chance to feed protocol_ a new
+  // notification -- a no-op unless pending_command_ == kIdentityProbe
+  // and a new response has actually arrived (same "sequence changed"
+  // detection TakeCommandOutcome() uses). response_code == 1
+  // ("INVALID_HMAC" -- grohe_protocol.cpp's own ResponseCodeToString())
+  // means this connection is NOT the provisioned appliance:
+  // ble_manager_.RejectCurrentPeerAndKeepScanning() disconnects it and
+  // resumes the search, never touching credentials_provider_. Any other
+  // received response proves the opposite (the appliance accepted a
+  // command signed with the current pre_shared_key_base64, which only
+  // the genuine provisioned appliance can do) --
+  // credentials_provider_.SetPinnedApplianceAddress(last_found_address_)
+  // persists it and ble_manager_.SetAddressFilter() applies it
+  // immediately, both from the exact address BleEvent::kDeviceFound
+  // carried for this same connection (see that field's own comment).
+  void ProcessIdentityProbeOutcome();
+
   BleManager ble_manager_;
   GroheProtocol protocol_;
-  const CredentialsProvider& credentials_provider_;
+  CredentialsProvider& credentials_provider_;
 
   // M9: time_provider_ needs a Wi-Fi connection purely as a one-shot SNTP
   // time source. That connection (time_service::WifiConnection) is
@@ -129,6 +184,15 @@ class GroheClient {
   // comment and TakeCommandOutcome()'s.
   PendingCommand pending_command_ = PendingCommand::kNone;
   uint32_t pending_command_baseline_sequence_ = 0;
+
+  // M15.2: the address BleEvent::kDeviceFound most recently carried --
+  // by the time kSubscribed fires for that same connection attempt (the
+  // event MaybeStartIdentityProbe() reacts to), this is already set, so
+  // ProcessIdentityProbeOutcome() has the right address to pin without
+  // needing a synchronous getter into BleManager's own internal state
+  // (see BleEvent::peer_address's own comment for why that's the
+  // deliberate design, not an oversight).
+  ble_addr_t last_found_address_ = {};
 };
 
 }  // namespace grohe_ble

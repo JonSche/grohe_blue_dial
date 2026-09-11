@@ -7,7 +7,7 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/jonasscherer/grohe_blue_dial/issues",
   "requirements": [
-    "grohe>=0.3.1",
+    "grohe>=0.2.4",
     "PyJWT>=2.10",
     "dataclasses-json>=0.6",
     "httpx>=0.27",

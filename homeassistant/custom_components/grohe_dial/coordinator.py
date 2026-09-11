@@ -42,6 +42,20 @@ class GroheDialCoordinator(DataUpdateCoordinator[DialStatus]):
         )
         self.client = client
         self._consecutive_connection_failures = 0
+        # M15.3: two forms of the same resolved link to a matching
+        # ha-grohe_smarthome device, both set once (or left None
+        # together) in __init__.py's own async_setup_entry() -- see
+        # _resolve_via_device()'s own comment for why both, and
+        # entity.py's own comment for which one actually gets used
+        # depending on what this specific, running HA version's own
+        # DeviceInfo supports (found the hard way: `via_device_id` --
+        # this integration's own first attempt -- does not exist at all
+        # in HA 2026.4.1, which still only has the older `via_device`
+        # tuple form; a newer HA might have the reverse). None/None
+        # whenever no link was found, ha-grohe_smarthome isn't
+        # installed, or this dial has no known Cloud appliance_id.
+        self.via_device_id: str | None = None
+        self.via_device_identifier: tuple[str, str] | None = None
 
     async def _async_update_data(self) -> DialStatus:
         try:
