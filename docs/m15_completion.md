@@ -1,15 +1,26 @@
 # M15 Completion — Stable Identity, Appliance Disambiguation, `via_device`
 
 > **Status: COMPLETE.** All three items M15 originally deferred are
-> implemented, automated-tested, and — for the two that are meaningfully
-> hardware-testable with the equipment actually available (exactly one
-> physical dial, one physical Grohe Blue Home) — hardware-accepted,
-> including the one scenario this milestone calls "the most important
-> correctness requirement": a real, physical rejection of a
-> wrong-credentialed appliance, using the real Grohe Blue Home's own
-> HMAC verification rather than a second physical device (none was
-> available — see §2's own honest account of why that substitution is
-> valid, not a shortcut). Implemented on branch `feature/m15-completion`,
+> implemented, automated-tested, and hardware-accepted against real
+> equipment throughout — the real dial, the real Grohe Blue Home, and (as of
+> §5's follow-up verification pass) the project's own real, live Home
+> Assistant instance and its real, already-installed `ha-grohe_smarthome`
+> integration, not just the newer pinned test dependency. This includes the
+> one scenario this milestone calls "the most important correctness
+> requirement": a real, physical rejection of a wrong-credentialed
+> appliance, using the real Grohe Blue Home's own HMAC verification rather
+> than a second physical device (none was available — see §2's own honest
+> account of why that substitution is valid, not a shortcut). Deploying to
+> the real HA instance also surfaced four real, previously-undiscovered
+> compatibility bugs against that specific, older HA version and its own
+> pinned `grohe` package version — none present in the newer test
+> dependency — each found, root-caused, fixed, verified, and
+> regression-tested; see §5 for the full account. Only genuinely
+> unavailable equipment remains untested: a second physical Grohe Blue Home
+> (§2), and a dispense triggered through HA's own service call rather than
+> the dial's local API directly (§5, blocked on the dial's own lapsed SNTP
+> time and a Long-Lived Access Token, both requiring the project owner's own
+> physical/account access). Implemented on branch `feature/m15-completion`,
 > off `main`@`a5fb657`. Tags used throughout: **IMPLEMENTED**,
 > **AUTOMATED TESTED**, **HARDWARE TESTED**, **NOT TESTED**.
 
@@ -99,11 +110,18 @@ already migrated (setup twice, no error, no double-rename).
 `GET /api/status` confirmed to report `"device_id":"38:44:be:f9:2f:28"` —
 matching the Wi-Fi MAC this same device already logged via
 `esp_wifi_get_mac()` in earlier milestones' own boot logs, confirming the two
-independent MAC-read paths genuinely agree. (The HA-side migration itself
-was not re-verified against a live Home Assistant instance this session — no
-HA instance was reconfigured; see §9's own scope note. Its correctness is
-established by the automated tests above, which exercise the real Device/
-Entity Registry machinery, not by a live HA re-add.)
+independent MAC-read paths genuinely agree.
+
+**HA-side migration — now also HARDWARE TESTED**, against the real,
+already-running Home Assistant instance (2026.4.1, not the newer pinned test
+dependency): deploying triggered a real bug the automated suite's own newer
+HA dependency could not have caught (`DeviceRegistry.async_get_devices()`
+does not exist on 2026.4.1 at all), and, after fixing that, a second real
+gap (the device registry's own `identifiers` field stayed on the old
+host-based value even after `unique_id` and every entity's own `unique_id`
+correctly migrated). Both are real, previously-undiscovered bugs, found and
+fixed only by deploying to the actual instance — see §5 for the full
+account, root cause, fix, and evidence for each.
 
 ---
 
@@ -248,7 +266,7 @@ evidence, not a mock.
 
 ---
 
-## 3. M15.3 — Home Assistant `via_device` — IMPLEMENTED, AUTOMATED TESTED, NOT TESTED (hardware)
+## 3. M15.3 — Home Assistant `via_device` — IMPLEMENTED, AUTOMATED TESTED, HARDWARE TESTED
 
 **Real dependency read, not assumed**: `ha-grohe_smarthome`'s own
 `entities/entity/sensor.py` constructs
@@ -257,17 +275,15 @@ evidence, not a mock.
 *same* Cloud `appliance_id` this integration's own M16 provisioning flow
 already fetches and, until now, discarded after use.
 
-**Also confirmed by reading the real installed HA source, not assumed**:
-the `DeviceInfo` TypedDict in the installed Home Assistant version has
-**no `via_device` key at all** — only `via_device_id: str`, an *internal
-Device Registry id*, not a `(domain, identifier)` tuple. Using the
-now-deprecated `async_get_device()` (breaks 2027.8.0) or inventing a
-non-existent `via_device` kwarg would both have been real mistakes; instead:
+**Initial HA source read (from the newer pinned test dependency, later found
+incomplete)**: the `DeviceInfo` TypedDict there has **no `via_device` key at
+all** — only `via_device_id: str`, an *internal Device Registry id*, not a
+`(domain, identifier)` tuple.
 `device_registry.async_get_devices(identifiers={(GROHE_SMARTHOME_DOMAIN,
 appliance_id)})` (the current, non-deprecated function that searches across
 *every* config entry, unlike the config-entry-scoped
-`async_get_device_by_identifier()` — necessary here since the target device
-belongs to a different integration's own config entry entirely).
+`async_get_device_by_identifier()`) was used to resolve it. **This shape
+turned out not to hold on the real, live instance** — see below and §5.
 
 **Implementation**:
 - `config_flow.py`'s `GroheDialOptionsFlow.async_step_provision_token()`
@@ -275,13 +291,18 @@ belongs to a different integration's own config entry entirely).
   `CONF_GROHE_APPLIANCE_ID` key, `const.py`) right alongside the existing
   successful-provisioning path — not a secret, the same kind of identifier
   `ha-grohe_smarthome`'s own device is already keyed by in the registry.
-- `__init__.py`'s `_resolve_via_device_id()`, called once in
-  `async_setup_entry()`: returns `None` for every failure mode (no
+- `__init__.py`'s `_resolve_via_device()`, called once in
+  `async_setup_entry()`: returns `(None, None)` for every failure mode (no
   `appliance_id` known, `ha-grohe_smarthome` not installed, no matching
-  device) — never raises. Cached on `coordinator.via_device_id`.
-- `entity.py` includes `"via_device_id"` in `DeviceInfo` only when resolved;
-  omitted entirely otherwise (not passed as `None` — the TypedDict field is
-  `str`, not `str | None`).
+  device) — never raises. Resolves **both** the `via_device_id` and the
+  older `via_device` tuple form from the same lookup, cached on
+  `coordinator.via_device_id` / `coordinator.via_device_identifier`
+  respectively (see §5 — this dual-form resolution is itself a fix, not the
+  original design).
+- `entity.py` picks whichever of the two forms this specific, running HA
+  version's own `DeviceInfo` actually declares (checked once, at import
+  time, via `DeviceInfo.__annotations__`) and includes only that one, only
+  when resolved.
 
 **Fully soft**: a dial provisioned via `scripts/provision.sh` directly
 (bypassing this integration's own Options Flow) simply never has an
@@ -295,34 +316,144 @@ time — if `ha-grohe_smarthome`'s config entry hasn't finished loading yet on
 the same HA restart, the link waits for the next reload rather than being
 retried automatically. A deliberate simplicity trade-off, not an oversight.
 
-**Tests** (`test_via_device.py`, 3 tests, plus 2 new assertions in
+**Tests** (`test_via_device.py`, 4 tests, plus 2 new assertions in
 `test_provisioning_flow.py` for the `appliance_id` persistence itself, all
 **AUTOMATED TESTED**): resolved when a matching device exists (via a real
 `MockConfigEntry`-backed fake `grohe_smarthome` device in the real Device
 Registry, not a mock of the resolution function itself); `None` without a
-known `appliance_id`; `None` without a matching device.
+known `appliance_id`; `None` without a matching device; the older
+`via_device` tuple form resolves to the same real device (monkeypatched
+version-detection flag, since this project's own pinned test dependency
+only takes the new-style path on its own).
 
-**Hardware**: **NOT TESTED** — no live `ha-grohe_smarthome` installation was
-available/reconfigured this session to verify a real cross-integration link
-end to end. Not claimed as hardware-verified.
+**Hardware (HARDWARE TESTED)**: verified end to end against the real,
+already-running `ha-grohe_smarthome` installation on the real Pi — but only
+after fixing a real bug this exact deployment surfaced (`via_device_id` does
+not exist in 2026.4.1's own `DeviceInfo`, only `via_device`; see §5). After
+the fix, the real Device Registry (`.storage/core.device_registry`,
+inspected directly) confirms: the `grohe_dial` device
+(identifier `mac-38:44:be:f9:2f:28`) has
+`via_device_id = 900a2a83e2f1fafba56c19024b5683bd`, which is exactly the
+`grohe_smarthome` device's own real id (identifier
+`8dbcfbbc-dda4-4aae-8e6d-fc7f76c0be69`, the account's real Grohe Blue Home
+appliance). The link is real, live, and confirmed on the actual instance —
+not a mock of the registries, not an assumption from the source read alone.
 
 ---
 
-## 4. Summary
+## 5. Live Home Assistant deployment verification — real bugs found and fixed
+
+Everything above this section was true as of this milestone's original
+completion. This section documents a follow-up verification pass:
+deploying `feature/m15-completion` to the real, already-running Home
+Assistant instance (2026.4.1, on the project's real Raspberry Pi) and the
+real, already-provisioned dial, rather than relying solely on the newer
+pinned test dependency (`.venv-test`) and the earlier hardware-only checks.
+This is the same discipline M15/M16 already established for firmware — real
+bugs surface during real acceptance, not before — applied here to the HA
+side for the first time. Four real, previously-undiscovered bugs surfaced,
+each root-caused via direct inspection of the real installed source/state
+(never guessed), fixed with version-compatible code, verified against the
+real environment, and backed by new regression tests:
+
+1. **`DeviceRegistry.async_get_devices()` does not exist on HA 2026.4.1**
+   (only the older, unscoped `async_get_device()`). This broke
+   `_find_device_by_identifier()` (used by both the M15.1 migration
+   self-heal and M15.3's via_device resolution). Confirmed via
+   `docker exec homeassistant python3 -c "..."` reading the real installed
+   `DeviceRegistry` source directly. Fixed with `hasattr()` runtime
+   detection, falling back to the older, unscoped call.
+   Regression-tested against plain fakes for both HA generations
+   (`test_ha_version_compat.py`, 4 tests).
+
+2. **M15.1 migration's device-identifier rename could get permanently
+   stuck.** After fix #1, `entry.unique_id` and every entity's own
+   `unique_id` correctly migrated to the stable, MAC-based form — but the
+   device registry's own `identifiers` field stayed on the old, host-based
+   value. Root cause: the device-rename attempt was gated by the same
+   "unique_id already migrated" guard as the rest of the function, so once
+   `unique_id` updated, a failed rename could never get a second chance to
+   correct itself. Fixed by decoupling: the device is now found via
+   `entity_registry.async_entries_for_config_entry()` → any entity's own
+   `.device_id` → `device_registry.async_get(device_id)` (both simple,
+   version-stable APIs), and re-checked/fixed on **every** setup call,
+   independent of `unique_id` state. Verified on the real Pi: same
+   `device.id` (area/labels/name_by_user preserved), new identifier list
+   correctly reading `['grohe_dial', 'mac-38:44:be:f9:2f:28']`.
+   Regression-tested (`test_migration_self_heals_a_stale_device_identifier`
+   in `test_stable_identity.py`, simulating the exact partially-migrated
+   real-world state found).
+
+3. **`grohe.exceptions` module missing at runtime**, breaking
+   `cloud.py` import entirely (`ModuleNotFoundError`, surfacing as HA's own
+   generic "Platform grohe_dial.config_flow not found"). Root cause: the
+   real Pi has `grohe==0.2.4` installed, not this integration's own
+   `>=0.3.1` requirement, because `ha-grohe_smarthome` — a separate, real,
+   already-installed integration sharing the same Python environment —
+   pins that exact version in its own `manifest.json`. Deliberately not
+   force-upgraded (too risky to an already-working third-party
+   integration); `cloud.py` made compatible with both via
+   `try/except ImportError` plus broadened `httpx`-exception classification
+   in `_wrap()`. Verified directly against the real, installed `grohe==0.2.4`
+   (`docker exec ... python3 -c "import cloud_test"`) before redeploying;
+   confirmed `ha-grohe_smarthome`'s own logs stayed unaffected. Three new
+   tests (`test_cloud.py`).
+
+4. **`via_device_id` does not exist in HA 2026.4.1's own `DeviceInfo`**
+   (only the older `via_device` tuple form) — the opposite of what the
+   newer pinned test dependency has, and the opposite of what §3's original
+   source read assumed. This broke `DeviceRegistry.async_get_or_create()`
+   for **every single** `grohe_dial` entity at startup
+   (`TypeError: ... got an unexpected keyword argument 'via_device_id'`),
+   across all six platforms (`binary_sensor`, `button`×2, `number`×2,
+   `select`, `sensor`×3). Confirmed via
+   `docker exec homeassistant python3 -c "from homeassistant.helpers.device_registry
+   import DeviceInfo; print(DeviceInfo.__annotations__.keys())"` reading the
+   real installed `DeviceInfo` TypedDict directly. Fixed by resolving both
+   forms once (`_resolve_via_device()`) and picking the one this running
+   HA version's own `DeviceInfo` actually declares, checked once at import
+   time (`entity.py`'s `_SUPPORTS_VIA_DEVICE_ID`). Regression-tested for the
+   old-style tuple path via monkeypatching (`test_via_device.py`, since this
+   project's own pinned test dependency only exercises the new path on its
+   own). Verified on the real Pi: all platforms load cleanly, and
+   §3's real via_device_id link is confirmed present in the real device
+   registry.
+
+All four fixes are committed on `feature/m15-completion` as two focused
+commits (`fix(ha): make device registry lookups and via_device linking
+version-compatible`, `fix(ha): tolerate grohe<0.3.0 lacking a
+grohe.exceptions module`), each redeployed to the real Pi and reverified via
+`docker logs` (clean startup, no `TypeError`/`ModuleNotFoundError`/entity-add
+errors) before being considered fixed.
+
+**Not part of this pass**: an actual dispense triggered *through* Home
+Assistant's own service call (`grohe_dial.dispense`) rather than the
+firmware's local HTTP API directly. Blocked on two things only the project
+owner can provide: the physical dial's SNTP time had lapsed
+(`time_status: UNAVAILABLE`) with USB disconnected at the time (no remote
+way to force a clean reboot without physical access), and calling any HA
+service via its REST API requires a Long-Lived Access Token, which requires
+a login to the HA frontend itself. Not claimed as tested.
+
+---
+
+## 6. Summary
 
 | Item | Code | Tests | Hardware |
 |---|---|---|---|
 | M15.1 Stable unique_id (new entries) | ✅ | ✅ 2 of 5 tests | ✅ `device_id` field confirmed on real dial |
-| M15.1 Migration (existing entries) | ✅ | ✅ 3 of 5 tests | Not re-verified against a live HA instance |
+| M15.1 Migration (existing entries) | ✅ | ✅ 3 of 5 + 1 self-heal test | ✅ real HA 2026.4.1, incl. a found-and-fixed self-healing gap (§5.2) |
 | M15.2 Appliance pin/probe (happy path) | ✅ | — (no C++ test harness exists) | ✅ real bootstrap, pin, reboot-persistence, reconnect |
 | M15.2 Reject path | ✅ | — | ✅ real `INVALID_HMAC` from the real appliance, real reject+rescan, real recovery |
 | M15.2 True multi-appliance (2 physical units) | ✅ (by construction) | — | ❌ NOT TESTED — only one physical appliance exists for this project |
-| M15.3 via_device resolution | ✅ | ✅ 3 tests + 2 assertions | ❌ NOT TESTED — no live `ha-grohe_smarthome` install |
+| M15.3 via_device resolution | ✅ | ✅ 4 tests + 2 assertions | ✅ real HA 2026.4.1, real `grohe_smarthome` device, incl. a found-and-fixed `via_device_id` incompatibility (§5.4) |
+| HA/grohe package version compatibility | ✅ | ✅ 3 tests + 4 tests | ✅ real HA 2026.4.1 + real `grohe==0.2.4` (§5.1, §5.3) |
 
-**Automated tests**: 79/79 pass across `homeassistant/tests/` (71 before
-this branch + 5 `test_stable_identity.py` + 3 `test_via_device.py`; 2 new
-assertions added to existing `test_provisioning_flow.py` tests, not new
-test functions).
+**Automated tests**: 88/88 pass across `homeassistant/tests/` (71 before
+this branch + 5 `test_stable_identity.py` + 1 self-heal regression test +
+4 `test_via_device.py` + 4 `test_ha_version_compat.py` + 3 `test_cloud.py`
+fallback-classification tests; 2 new assertions added to existing
+`test_provisioning_flow.py` tests, not new test functions).
 
 **Firmware build**: clean, 0 errors, 15 pre-existing warnings only (same
 baseline as M16 — none introduced here). Flash: 20% free on the app
