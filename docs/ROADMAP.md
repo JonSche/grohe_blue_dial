@@ -61,10 +61,12 @@ just logging.
       `Gc9a01Display::SetBacklight()` already supports on/off) -- delivered
       in [M11.2](#m112--display-sleep) once there was a real dispense
       state machine to keep the display awake for.
-- [ ] Real product decision on whether this is the final screen layout, or
-      just the first cut -- this milestone is deliberately a single static
-      screen, no menus/pages (see M11 for BLE-driven content and visual
-      polish).
+- [x] **Resolved in practice**: this round layout, extended (not replaced)
+      by M11/M11.1's BLE-driven content and visual polish, is what shipped
+      -- no menus/pages were ever added, and it's the same design the
+      README's own hero shot and screenshots show as of M16. Never revised
+      after M11.1; "first cut or final" answered itself by staying
+      unchanged across ten further milestones of real hardware use.
 
 ## M3 — BLE client foundation
 
@@ -688,7 +690,7 @@ with no full-image buffering. See
       [ARCHITECTURE.md](ARCHITECTURE.md#ota-m12)'s "Rollback" design) but
       that specific scenario remains hardware-untested.
 
-## M13 — Home Assistant Integration
+## M13 — Home Assistant Integration ✅ (goals achieved via M15, not this milestone's original MQTT design)
 
 Home Assistant extends the product; it never becomes a runtime dependency
 of it -- the same "optional, not a dependency" principle M9 already
@@ -1046,11 +1048,16 @@ for the full reasoning, measured numbers, and evidence behind each one.
       exists to simulate encoder input or a dispense command from this
       environment) -- recorded here because it closes the one gap the
       automated validation above could not cover on its own.
-- [ ] **Not yet done**: a real `POST /ota` firmware upload exercising
-      `esp_ota_write()`'s actual flash-write path at the reduced 4096 B
-      httpd stack size -- only `GET /version` and unauthenticated-request
-      routing were tested. Lower confidence than every other result in
-      this milestone.
+- [x] **Since exercised for real** (post-M15, and repeatedly during M16):
+      a real `POST /ota` upload through `esp_ota_write()`'s actual
+      flash-write path at this milestone's 4096 B httpd stack size, on
+      the real device -- no fault at that stack size specifically.
+      M16 separately found that OTA can become unreliable when the
+      device is stuck rebooting during its own boot window (BLE/Wi-Fi
+      radio contention on the shared ESP32-C3 radio, not a stack-size or
+      flash-write defect) -- see
+      [`docs/m16_reliability_and_provisioning.md`](m16_reliability_and_provisioning.md)
+      §7. USB remains the unconditional fallback for that specific case.
 
 ### M15 — Native Home Assistant Integration (Local HTTP, MQTT Removed) ✅
 
@@ -1113,14 +1120,18 @@ Home Assistant -> Grohe Dial HA Integration -> local HTTP -> Grohe Dial -> BLE -
       inconsistent snapshot (not just a stale one). Closed by routing
       the read through the same app-task queue the write side already
       uses (`d8ff91c`).
-- [ ] **Not tested**: a real `POST /ota` firmware upload (routing and
-      `GET /version` are hardware-verified; the actual upload path
-      wasn't exercised this milestone -- explicitly out of M15's core
-      scope, not a blocker).
-- [ ] **Deferred, not an M15 blocker**: Cloud login / Grohe Blue Home
-      linking, `via_device` device linking, the dial's stable MAC-based
-      `unique_id` (host/IP used instead today), multi-appliance BLE
-      disambiguation. CO₂/filter/consumables are a hard architectural
+- [x] **Since tested for real**: a real `POST /ota` firmware upload
+      (ad-hoc, right after this milestone closed, rebuilding `main`) and
+      repeatedly again during M16's own interactive deployment steps --
+      see M14's own updated entry above for the one caveat M16 found
+      (boot-time radio contention, not this upload path itself).
+- [ ] **Still deferred, not a blocker**: `via_device` device linking, the
+      dial's stable MAC-based `unique_id` (host/IP used instead today),
+      multi-appliance BLE disambiguation. Cloud login itself was added in
+      M16 (`homeassistant/custom_components/grohe_dial/cloud.py`), but
+      only for one-shot BLE-credential *provisioning* -- not the ongoing
+      Cloud-linked device model this bullet originally meant, which
+      remains undone. CO₂/filter/consumables are a hard architectural
       boundary, not a deferred feature -- the dial's BLE link to the
       Grohe Blue Home never carries that data.
 
@@ -1202,13 +1213,57 @@ made available. See the doc's own §7 for the full account.
 ## v1.0 Release Criteria
 
 What "version 1.0" means for this project -- the minimum bar for the
-first production release, not a milestone in itself.
+first production release, not a milestone in itself. Updated after M16
+to reflect what's actually been verified, not just planned; each item
+below links to the milestone(s) that are its evidence.
 
 - [x] M10 completed.
-- [x] M12 completed.
-- [ ] M13 completed.
-- [ ] Stable hardware validation.
-- [ ] Reliable flashing workflow.
-- [ ] Reliable debugging.
-- [ ] No known critical defects.
-- [ ] Complete documentation.
+- [x] M12 completed. Core (M12.3 Build & Release, M12.4 OTA) is done;
+      M12.1 (JTAG/OpenOCD debugging) and M12.2 (flash helper tooling
+      beyond `idf.py flash`/`scripts/ota.sh`) remain explicitly optional
+      and undone -- see their own headings above. Not a blocker: neither
+      was ever load-bearing for shipping, only for developer convenience.
+- [x] M13 completed -- via M15, not this milestone's original MQTT
+      design (see M13's own updated heading above). Every underlying
+      goal (persistent settings, provisioning, a real HA integration,
+      dispense-failure feedback) shipped, just over local HTTP instead of
+      MQTT + Discovery.
+- [x] Stable hardware validation. Every milestone from M0 through M16 has
+      its own hardware-verified section above; M16 additionally added
+      real forced-failure testing (a real mid-dispense BLE disconnect, an
+      aggressive poll loop across a real reboot, real Grohe Cloud
+      provisioning) on top of the happy-path validation earlier
+      milestones already had.
+- [x] Reliable flashing workflow. USB (`idf.py flash`) has never failed
+      across the whole project. OTA (`scripts/ota.sh`) is reliable in
+      normal operation (used repeatedly through M15 and M16's own
+      interactive deployment steps) with one known, narrow exception: a
+      device stuck rebooting during its own boot window can outrun OTA's
+      upload window due to BLE/Wi-Fi radio contention -- see M14's and
+      M15's updated OTA bullets above and
+      [`docs/m16_reliability_and_provisioning.md`](m16_reliability_and_provisioning.md)
+      §7. USB is the unconditional fallback for that one case, and M16.3
+      now also makes a hang that *causes* such a loop self-correct via
+      the watchdog rather than requiring recovery at all.
+- [x] Reliable debugging. Not via M12.1's originally-planned JTAG/OpenOCD
+      setup (still undone, still optional) -- via serial log capture and
+      systematic root-causing instead, the same method used successfully
+      across every hardware investigation in this project, including
+      M14's RAM forensics and M16's own reboot-loop diagnosis. Judged
+      sufficient in practice, not just in principle.
+- [x] No known **critical** defects. Known, non-critical limitations are
+      tracked, not hidden: OTA's boot-time-radio-contention edge case
+      (above, USB fallback always available), the dial's host/IP-based
+      (not MAC-based) `unique_id`, no `via_device` HA linking, no
+      multi-appliance BLE disambiguation, and the hard architectural
+      boundary that CO₂/filter/consumables data is Cloud-only and never
+      reaches this BLE-only firmware. None of these affect core dispense/
+      stop/BLE/UI reliability, which M0-M16's hardware acceptance
+      consistently found solid.
+- [x] Complete documentation. `README.md`, `docs/ARCHITECTURE.md`,
+      `docs/ROADMAP.md` (this file), `docs/m15_ha_integration.md`,
+      `docs/m16_reliability_and_provisioning.md`, `docs/ui/*`,
+      `SECURITY.md`, and `hardware/enclosure/` together cover the
+      protocol, firmware architecture, every milestone's own evidence,
+      the HA integration, security posture, and physical build --
+      updated alongside the code they describe, not after the fact.
