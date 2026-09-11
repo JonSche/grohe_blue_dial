@@ -22,7 +22,7 @@ from custom_components.grohe_dial.api import (
     GroheDialCommandRejected,
     GroheDialConnectionError,
 )
-from custom_components.grohe_dial.const import CONF_API_TOKEN, DOMAIN
+from custom_components.grohe_dial.const import CONF_API_TOKEN, CONF_GROHE_APPLIANCE_ID, DOMAIN
 
 pytestmark = pytest.mark.asyncio
 
@@ -82,6 +82,9 @@ async def test_successful_provisioning_single_appliance(hass: HomeAssistant, ent
     # provision_dial() -- confirms the whole chain actually wired
     # together, not just that each step didn't crash.
     assert call_kwargs.args[5] == "key1"  # preshared_key_base64 (positional arg 5: session,host,port,provision_token,user_id,preshared_key_base64)
+    # M15.3: the Cloud appliance_id must be persisted into entry.data so
+    # __init__.py's own via_device_id resolution can find it later.
+    assert entry.data[CONF_GROHE_APPLIANCE_ID] == "appl-1"
 
 
 async def test_multiple_appliances_shows_picker(hass: HomeAssistant, entry: MockConfigEntry) -> None:
@@ -105,6 +108,7 @@ async def test_multiple_appliances_shows_picker(hass: HomeAssistant, entry: Mock
         assert result["type"] is FlowResultType.CREATE_ENTRY
 
     assert mock_provision.call_args.args[5] == "key2"  # the *selected* (Office) appliance's key, not Kitchen's (index 5, not 4 -- see above)
+    assert entry.data[CONF_GROHE_APPLIANCE_ID] == "appl-2"  # the *selected* appliance's id, not the first candidate's
 
 
 async def test_invalid_cloud_credentials(hass: HomeAssistant, entry: MockConfigEntry) -> None:
