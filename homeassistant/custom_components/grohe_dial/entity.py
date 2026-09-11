@@ -7,14 +7,28 @@ how an existing entry moves from the fallback to the stable form in
 place, without changing what dial_id resolves to here breaking anything
 already in the device/entity registries).
 
-M15.3: via_device_id, when GroheDialCoordinator resolved one (an
-installed ha-grohe_smarthome integration owning the same Cloud
+M15.3: links this device as a child of a matching ha-grohe_smarthome
+device in the Device Registry, when GroheDialCoordinator resolved one
+(that integration installed and owning a device for the same Cloud
 appliance_id this dial was provisioned against -- see cloud.py/
-config_flow.py's GroheDialOptionsFlow), links this device as a child of
-that one in the Device Registry. None whenever it wasn't resolved (no
+config_flow.py's GroheDialOptionsFlow). Both coordinator.via_device_id/
+via_device_identifier are None together whenever it wasn't resolved (no
 appliance_id known for this dial, no matching device, or
 ha-grohe_smarthome not installed) -- the dial is a fully standalone
 device either way; this is a soft, optional enhancement only.
+
+Which DeviceInfo key actually gets used (`via_device_id`, an internal
+Device Registry id, vs. the older `via_device`, a (domain, identifier)
+tuple) is decided once, at import time, by checking which one this
+specific, running Home Assistant version's own DeviceInfo TypedDict
+actually declares -- found the hard way, deploying to a real Home
+Assistant instance: `via_device_id` (this integration's own first
+attempt, matching a newer, separately-installed HA test dependency)
+does not exist at all on HA 2026.4.1, which still only has `via_device`
+-- and a future HA version could just as easily drop `via_device`
+entirely the way it already dropped it from some newer test
+environments. Never assume one specific HA version's own DeviceInfo
+shape; check what's actually there.
 """
 
 from __future__ import annotations
@@ -24,6 +38,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import GroheDialCoordinator
+
+_SUPPORTS_VIA_DEVICE_ID = "via_device_id" in DeviceInfo.__annotations__
 
 
 class GroheDialEntity(CoordinatorEntity[GroheDialCoordinator]):
@@ -39,6 +55,9 @@ class GroheDialEntity(CoordinatorEntity[GroheDialCoordinator]):
             manufacturer="Grohe Dial (community project)",
             model="ESP32-C3 Grohe Dial",
         )
-        if coordinator.via_device_id is not None:
-            device_info["via_device_id"] = coordinator.via_device_id
+        if _SUPPORTS_VIA_DEVICE_ID:
+            if coordinator.via_device_id is not None:
+                device_info["via_device_id"] = coordinator.via_device_id
+        elif coordinator.via_device_identifier is not None:
+            device_info["via_device"] = coordinator.via_device_identifier
         self._attr_device_info = device_info

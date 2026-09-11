@@ -6,7 +6,7 @@ appliance_id -- see const.py's own CONF_GROHE_APPLIANCE_ID comment).
 Every scenario is driven through the real __init__.py's
 async_setup_entry() and inspected via the real Device Registry, matching
 this suite's own established style (test_init.py, test_stable_identity.py)
-rather than reaching into __init__.py's private _resolve_via_device_id()
+rather than reaching into __init__.py's private _resolve_via_device()
 directly.
 """
 
@@ -19,6 +19,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.grohe_dial import entity as entity_module
 from custom_components.grohe_dial.api import DialStatus
 from custom_components.grohe_dial.const import CONF_API_TOKEN, CONF_GROHE_APPLIANCE_ID, DOMAIN, GROHE_SMARTHOME_DOMAIN
 
@@ -108,3 +109,38 @@ async def test_via_device_id_none_without_matching_device(hass: HomeAssistant) -
     dial_device = _dial_device(hass, entry)
     assert dial_device is not None
     assert dial_device.via_device_id is None
+
+
+async def test_via_device_tuple_used_on_ha_versions_without_via_device_id(
+    hass: HomeAssistant,
+) -> None:
+    """Real bug, found deploying to a real HA 2026.4.1 instance: that
+    version's own DeviceInfo TypedDict has no `via_device_id` key at all
+    (only the older `via_device` (domain, identifier) tuple form) --
+    entity.py's own _SUPPORTS_VIA_DEVICE_ID check picks between the two
+    at import time, but this suite's own pinned test dependency is newer
+    and always takes the via_device_id branch on its own. Monkeypatching
+    the flag directly is the only way to exercise the older branch here,
+    without pinning this whole suite to an older HA release just for this
+    one path -- entity.py's own DeviceInfo construction is what's under
+    test, not which branch a given HA version happens to select.
+    """
+    smarthome_entry = MockConfigEntry(domain=GROHE_SMARTHOME_DOMAIN)
+    smarthome_entry.add_to_hass(hass)
+    device_registry = dr.async_get(hass)
+    device_registry.async_get_or_create(
+        config_entry_id=smarthome_entry.entry_id,
+        identifiers={(GROHE_SMARTHOME_DOMAIN, _APPLIANCE_ID)},
+        name="My GROHE Blue Home",
+    )
+
+    with patch.object(entity_module, "_SUPPORTS_VIA_DEVICE_ID", False):
+        entry = await _setup_dial_entry(hass, with_appliance_id=True)
+
+    dial_device = _dial_device(hass, entry)
+    assert dial_device is not None
+    # HA's own DeviceRegistry resolves a stored `via_device` tuple back to
+    # the same internal device.id regardless of which DeviceInfo key was
+    # used to set it -- via_device_id is the one stable, version-
+    # independent thing to assert on here.
+    assert dial_device.via_device_id is not None

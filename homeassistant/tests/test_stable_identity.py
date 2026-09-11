@@ -189,3 +189,74 @@ async def test_migration_idempotent_once_already_migrated(
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
     assert entry.unique_id == f"mac-{_DEVICE_ID}"
+
+
+async def test_migration_self_heals_a_stale_device_identifier(
+    hass: HomeAssistant, enable_custom_integrations
+) -> None:
+    """Regression test for a real bug found deploying to a real, live
+    HA 2026.4.1 installation: a first migration correctly updated
+    entry.unique_id and every entity's own unique_id, but -- on that HA
+    version specifically, where DeviceRegistry has no async_get_devices()
+    at all -- silently failed to find/rename the device registry row
+    itself, leaving it permanently stuck on the legacy identifier (the
+    original guard only checked entry.unique_id, so a device-rename
+    gated the exact same way would never get a second chance). The fix
+    decouples the device-identifier check from that guard and re-runs
+    it, cheaply, on every setup -- this simulates exactly that stuck
+    state (unique_id and entities already correct, device identifier
+    deliberately left stale) and confirms a further setup corrects it.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=_HOST,
+        data={"host": _HOST, "port": 8080, CONF_API_TOKEN: "sometoken"},
+    )
+    entry.add_to_hass(hass)
+
+    p1, p2 = _patched(_status(None))
+    with p1, p2:
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    device_registry = dr.async_get(hass)
+    old_device = device_registry.async_get_device_by_identifier((DOMAIN, _HOST), entry.entry_id)
+    assert old_device is not None
+    device_id = old_device.id
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    # Simulate the real, partially-migrated state directly: unique_id
+    # and entity unique_ids already correct, but the device's own
+    # identifiers manually left on the legacy value -- exactly what was
+    # found on the real installation, not artificially constructed from
+    # nothing.
+    hass.config_entries.async_update_entry(entry, unique_id=f"mac-{_DEVICE_ID}")
+    entity_registry = er.async_get(hass)
+    for entity_entry in er.async_entries_for_config_entry(entity_registry, entry.entry_id):
+        assert entity_entry.unique_id.startswith(f"{_HOST}_")
+        suffix = entity_entry.unique_id[len(_HOST) :]
+        entity_registry.async_update_entity(
+            entity_entry.entity_id, new_unique_id=f"mac-{_DEVICE_ID}{suffix}"
+        )
+    assert device_registry.async_get_device_by_identifier((DOMAIN, _HOST), entry.entry_id) is not None
+    assert (
+        device_registry.async_get_device_by_identifier((DOMAIN, f"mac-{_DEVICE_ID}"), entry.entry_id)
+        is None
+    )
+
+    # A further setup, now against firmware that *does* report a
+    # device_id, must find and fix the still-stale device identifier
+    # even though entry.unique_id already looks fully migrated.
+    p3, p4 = _patched(_status(_DEVICE_ID))
+    with p3, p4:
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    fixed_device = device_registry.async_get_device_by_identifier(
+        (DOMAIN, f"mac-{_DEVICE_ID}"), entry.entry_id
+    )
+    assert fixed_device is not None
+    assert fixed_device.id == device_id  # same device, not a new one
+    assert device_registry.async_get_device_by_identifier((DOMAIN, _HOST), entry.entry_id) is None
