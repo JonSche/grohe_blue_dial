@@ -28,8 +28,29 @@ from dataclasses import dataclass
 
 import httpx
 import jwt
-from grohe.exceptions import GroheError, GroheNetworkError, GroheUnauthorizedError
 from grohe.tokens import GroheTokens
+
+# grohe's own structured exception hierarchy (grohe.exceptions) was
+# introduced in 0.3.0 -- older installs some real-world setups are
+# genuinely still pinned to (e.g. a separately-installed, unrelated
+# integration sharing this same Python environment that pins an older
+# exact version -- found deploying to a real Home Assistant instance
+# with exactly that conflict, not a hypothetical) predate it entirely
+# and raise plain httpx exceptions / bare `Exception` from
+# GroheTokens.get_tokens_from_credentials()/get_refresh_tokens() instead
+# -- see _wrap()'s own comment for how both shapes are handled without
+# ever assuming one specific `grohe` version is installed, and without
+# forcing an upgrade that could break whatever else in the same
+# environment pins an older one.
+try:
+    from grohe.exceptions import GroheError, GroheNetworkError, GroheUnauthorizedError
+except ImportError:  # grohe < 0.3.0
+    # Empty tuples, not None: `except GroheError:`/`isinstance(err,
+    # GroheUnauthorizedError)` both stay syntactically valid this way
+    # (`except ():`/`isinstance(x, ())` are legal Python, and simply
+    # never match) -- see _wrap()'s own comment for the httpx-based
+    # classification that covers this case instead.
+    GroheError = GroheNetworkError = GroheUnauthorizedError = ()  # type: ignore[assignment,misc]
 
 API_URL = "https://idp2-apigw.cloud.grohe.com/v3/iot"
 DASHBOARD_URL = f"{API_URL}/dashboard"
@@ -89,10 +110,29 @@ class GroheApplianceCandidate:
     preshared_key_base64: str
 
 
-def _wrap(err: GroheError) -> GroheCloudError:
-    if isinstance(err, GroheUnauthorizedError):
+def _wrap(err: Exception) -> GroheCloudError:
+    if GroheUnauthorizedError and isinstance(err, GroheUnauthorizedError):
         return GroheCloudAuthError(str(err))
-    if isinstance(err, GroheNetworkError):
+    if GroheNetworkError and isinstance(err, GroheNetworkError):
+        return GroheCloudConnectionError(str(err))
+    if GroheError and isinstance(err, GroheError):
+        return GroheCloudError(str(err))
+    # grohe < 0.3.0 (this module's own header comment) has no structured
+    # exception hierarchy at all -- GroheTokens.get_tokens_from_credentials()/
+    # get_refresh_tokens() raise httpx's own exceptions directly instead
+    # (verified by reading that version's real, installed source, not
+    # assumed), classified here the same way list_appliances() below
+    # already classifies its own direct httpx calls. A bare Exception
+    # that isn't an httpx one either (e.g. 0.2.4's own generic "Invalid
+    # username/password..." raise) falls through to GroheCloudError
+    # (surfaced as "unknown", not "invalid_cloud_auth") -- an accepted,
+    # honest precision loss against an unsupported-by-upstream version,
+    # not a silently wrong classification.
+    if isinstance(err, httpx.HTTPStatusError):
+        if err.response.status_code in (401, 403):
+            return GroheCloudAuthError(str(err))
+        return GroheCloudConnectionError(str(err))
+    if isinstance(err, httpx.HTTPError):
         return GroheCloudConnectionError(str(err))
     return GroheCloudError(str(err))
 
@@ -106,7 +146,7 @@ async def login_with_credentials(email: str, password: str) -> GroheCloudTokens:
         token_handler = GroheTokens(client, API_URL)
         try:
             tokens = await token_handler.get_tokens_from_credentials(email, password)
-        except GroheError as err:
+        except Exception as err:  # noqa: BLE001 - _wrap() classifies every real shape (see its own comment); anything truly unexpected still becomes a typed GroheCloudError, never escapes as-is.
             raise _wrap(err) from err
     return GroheCloudTokens(access_token=tokens.access_token, refresh_token=tokens.refresh_token)
 
@@ -118,7 +158,7 @@ async def refresh_tokens(refresh_token: str) -> GroheCloudTokens:
         token_handler = GroheTokens(client, API_URL)
         try:
             tokens = await token_handler.get_refresh_tokens(refresh_token)
-        except GroheError as err:
+        except Exception as err:  # noqa: BLE001 - see login_with_credentials()'s own comment.
             raise _wrap(err) from err
     return GroheCloudTokens(access_token=tokens.access_token, refresh_token=tokens.refresh_token)
 
