@@ -125,6 +125,15 @@ enum class BleEventType {
 struct BleEvent {
   BleEventType type;
   int reason = 0;  // Meaningful for kHostReset and kConnectionFailed.
+  // M15.2: the peer's own BLE address -- meaningful for kDeviceFound
+  // only, copied from device_addr_ at the exact moment it's set (see
+  // HandleDiscReport()), so a consumer that needs it later (GroheClient,
+  // to persist a newly-verified appliance pin -- see that class's own
+  // comment) doesn't need a separate, cross-task-unsafe synchronous
+  // getter into this class's internal state; by the time kSubscribed
+  // fires for the same connection attempt, its own kDeviceFound has
+  // already carried the address up through this same queue.
+  ble_addr_t peer_address = {};
 };
 
 // A discovered characteristic's UUID, or one received notification/
@@ -260,6 +269,37 @@ class BleManager {
   // exactly like every other GATT procedure in this class).
   esp_err_t WriteCharacteristic(uint16_t val_handle, const uint8_t* data,
                                size_t data_len);
+
+  // M15.2: restricts discovery to exactly this address -- once set, an
+  // advertisement from any other address is ignored even if it also
+  // advertises the Grohe service UUID (AdvertisesGroheService() is
+  // necessary but no longer sufficient once a filter is set). This is
+  // the ongoing "connect only to the appliance we already verified"
+  // steady state (see grohe_client.hpp's own comment on the identity
+  // pinning this backs); with no filter set (the default, and the
+  // bootstrap-provisioning state), behavior is unchanged from before
+  // M15.2 -- connect to the first service-UUID match, same as always.
+  // Safe to call from any task -- queued, not applied synchronously
+  // (see command_event_'s own comment for why raw NimBLE/connection
+  // state is never touched off the host task).
+  void SetAddressFilter(const ble_addr_t& address);
+
+  // Removes a filter set by SetAddressFilter() -- discovery reverts to
+  // "first Grohe-service-UUID match" (the bootstrap state used whenever
+  // no appliance has been cryptographically verified yet -- see
+  // grohe_credentials.hpp's own PinnedApplianceAddress). Safe to call
+  // from any task, same mechanism as SetAddressFilter().
+  void ClearAddressFilter();
+
+  // M15.2: disconnects from the currently-connected peer (if any),
+  // remembers its address for the remainder of this boot so discovery
+  // never immediately reselects it (see kRejectedAddressCapacity's own
+  // comment), and lets the existing FailConnection()/ScheduleReconnect()
+  // machinery take over from there -- exactly the same recovery path a
+  // real link loss already uses, just entered deliberately instead of
+  // by a radio event. Safe to call from any task, same mechanism as
+  // SetAddressFilter(). A no-op if not currently connected to anyone.
+  void RejectCurrentPeerAndKeepScanning();
 
  private:
   static void HostTask(void* param);
@@ -463,6 +503,50 @@ class BleManager {
   size_t backoff_index_ = 0;
   esp_timer_handle_t backoff_timer_ = nullptr;
   struct ble_npl_event reconnect_event_ = {};
+
+  // M15.2 appliance disambiguation -- SetAddressFilter()/
+  // ClearAddressFilter()/RejectCurrentPeerAndKeepScanning() (public,
+  // above) each queue one of these onto filter_command_queue_ (depth 1,
+  // xQueueOverwrite -- only the *latest* desired state ever matters,
+  // exactly like app.cpp's own api_status_queue_) and post
+  // filter_command_event_ to wake the host task, mirroring
+  // command_queue_/command_event_'s own cross-task discipline exactly:
+  // address_filter_/has_address_filter_/rejected_addresses_ below are
+  // touched only on the host task, from HandleFilterCommandEvent().
+  enum class FilterCommandKind { kSetFilter, kClearFilter, kReject };
+  struct FilterCommand {
+    FilterCommandKind kind;
+    ble_addr_t address;  // meaningful for kSetFilter only
+  };
+  QueueHandle_t filter_command_queue_ = nullptr;
+  struct ble_npl_event filter_command_event_ = {};
+  static void OnFilterCommandEvent(struct ble_npl_event* event);
+  void HandleFilterCommandEvent();
+
+  // has_address_filter_/address_filter_: when set, HandleDiscReport()
+  // ignores every advertisement not from this exact address, even one
+  // that also advertises the Grohe service UUID -- see
+  // SetAddressFilter()'s own comment.
+  bool has_address_filter_ = false;
+  ble_addr_t address_filter_ = {};
+
+  // Addresses rejected this boot by a failed identity probe (see
+  // grohe_client.hpp's own comment) -- never persisted, never needs to
+  // be: a device that failed the HMAC probe once stays rejected only
+  // long enough that discovery does not immediately reselect it after
+  // RejectCurrentPeerAndKeepScanning() disconnects; a full reboot (or
+  // simply no longer being the first match once a genuine candidate is
+  // found) naturally clears it. 4 slots -- generous for "more than one
+  // wrong nearby appliance", never expected to fill in practice; a full
+  // list just means the oldest rejection is forgotten first (a device
+  // that was probed 5+ boots-worth of "wrong" appliances ago is safe to
+  // reconsider -- likely evidence the earlier candidate is no longer
+  // even present).
+  static constexpr size_t kRejectedAddressCapacity = 4;
+  ble_addr_t rejected_addresses_[kRejectedAddressCapacity] = {};
+  size_t rejected_address_count_ = 0;
+  [[nodiscard]] bool IsRejectedAddress(const ble_addr_t& address) const;
+  void RememberRejectedAddress(const ble_addr_t& address);
 
   // The read characteristic's value handle, non-zero from the moment it's
   // found until its subscribe sequence resolves one way or another (CCCD
