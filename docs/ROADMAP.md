@@ -1131,19 +1131,42 @@ Home Assistant -> Grohe Dial HA Integration -> local HTTP -> Grohe Dial -> BLE -
       wrong-credentialed appliance using the real Grohe Blue Home's own
       HMAC check (no second physical appliance was available, or
       needed -- see that doc's own §2 for why the substitution is
-      valid); `via_device_id` links to a matching `ha-grohe_smarthome`
-      device when the Cloud `appliance_id` from M16's own provisioning
-      flow is known and that integration is installed, fully optional
-      otherwise. CO₂/filter/consumables remain a hard architectural
-      boundary, not a deferred feature -- the dial's BLE link to the
-      Grohe Blue Home never carries that data.
+      valid); the device/`via_device` link to a matching
+      `ha-grohe_smarthome` device is resolved when the Cloud
+      `appliance_id` from M16's own provisioning flow is known and that
+      integration is installed, fully optional otherwise. CO₂/filter/
+      consumables remain a hard architectural boundary, not a deferred
+      feature -- the dial's BLE link to the Grohe Blue Home never
+      carries that data.
+- [x] **Real Home Assistant instance deployment verification**: all
+      three items above were re-verified against the project's actual,
+      already-running Home Assistant install (not just the newer pinned
+      test dependency) -- surfacing and fixing four real compatibility
+      bugs that instance's own, older HA version and its own pinned
+      `grohe` package version exposed (`DeviceRegistry.async_get_devices()`
+      absent, a self-healing gap in the M15.1 migration, a missing
+      `grohe.exceptions` module against the real, shared `grohe==0.2.4`
+      dependency, and a `via_device_id`/`via_device` incompatibility that
+      broke every entity at startup). Full account, root cause, fix, and
+      evidence for each in [`docs/m15_completion.md`](m15_completion.md)
+      §5. Closed with a genuine, hardware-verified acceptance test: a
+      real `grohe_dial.dispense` and `grohe_dial.stop`, both invoked
+      through Home Assistant's own Developer Tools service-call UI (not
+      the dial's HTTP API directly, not a mock), reaching the real Grohe
+      Blue Home over BLE -- confirmed via the recorder DB (a real
+      `dispensing` → `stopping` → `idle` transition, delivered amount
+      rising then halting early on `stop`) and the dial's own
+      `appliance_response: {received: true, success: true}`, with zero
+      HA log lines (no errors, no BLE disconnect, no reboot) during the
+      entire test window.
 
 Committed as four commits, all merged to `main` (`bb10480`, `d8ff91c`,
 `141db73`, `57d2b7e`), M14 (`c31058a`) unchanged as their ancestor. The
-three items above closed later, on `feature/m15-completion`, once M16
-had already closed -- see that branch's own commits and
-[`docs/m15_completion.md`](m15_completion.md) for the full account of
-why M15 stayed open that long.
+three items above, plus the real-HA-instance verification pass, closed
+later on `feature/m15-completion`, once M16 had already closed -- not
+yet merged to `main` as of this writing; see that branch's own commits
+and [`docs/m15_completion.md`](m15_completion.md) for the full account
+of why M15 stayed open that long.
 
 ### M16 — Reliability Hardening + Grohe Blue Provisioning ✅
 
@@ -1264,7 +1287,11 @@ below links to the milestone(s) that are its evidence.
       boundary that CO₂/filter/consumables data is Cloud-only and never
       reaches this BLE-only firmware. The dial's `unique_id`, appliance
       identity, and optional `via_device` linking -- all listed here as
-      limitations until M15's own completion -- are resolved; see
+      limitations until M15's own completion -- are resolved, and
+      re-verified against the project's actual, live Home Assistant
+      instance (not just the pinned test dependency), including a real
+      `grohe_dial.dispense`/`grohe_dial.stop` invoked through HA's own
+      service mechanism; see
       [`docs/m15_completion.md`](m15_completion.md). None of the
       remaining items affect core dispense/stop/BLE/UI reliability,
       which M0-M16's hardware acceptance consistently found solid.

@@ -15,13 +15,15 @@
 > compatibility bugs against that specific, older HA version and its own
 > pinned `grohe` package version — none present in the newer test
 > dependency — each found, root-caused, fixed, verified, and
-> regression-tested; see §5 for the full account. Only genuinely
-> unavailable equipment remains untested: a second physical Grohe Blue Home
-> (§2), and a dispense triggered through HA's own service call rather than
-> the dial's local API directly (§5, blocked on the dial's own lapsed SNTP
-> time and a Long-Lived Access Token, both requiring the project owner's own
-> physical/account access). Implemented on branch `feature/m15-completion`,
-> off `main`@`a5fb657`. Tags used throughout: **IMPLEMENTED**,
+> regression-tested; see §5 for the full account. §5 also covers the final
+> acceptance test: a real `grohe_dial.dispense` and `grohe_dial.stop`,
+> each invoked through Home Assistant's own Developer Tools service-call
+> UI by the project owner (their own already-authenticated session — no
+> token ever shared with or handled by this work), reaching the real
+> Grohe Blue Home over BLE and back. The only genuinely unavailable
+> equipment remains untested: a second physical Grohe Blue Home (§2).
+> Implemented on branch `feature/m15-completion`, off `main`@`a5fb657`,
+> not yet merged. Tags used throughout: **IMPLEMENTED**,
 > **AUTOMATED TESTED**, **HARDWARE TESTED**, **NOT TESTED**.
 
 ---
@@ -426,14 +428,56 @@ grohe.exceptions module`), each redeployed to the real Pi and reverified via
 `docker logs` (clean startup, no `TypeError`/`ModuleNotFoundError`/entity-add
 errors) before being considered fixed.
 
-**Not part of this pass**: an actual dispense triggered *through* Home
-Assistant's own service call (`grohe_dial.dispense`) rather than the
-firmware's local HTTP API directly. Blocked on two things only the project
-owner can provide: the physical dial's SNTP time had lapsed
-(`time_status: UNAVAILABLE`) with USB disconnected at the time (no remote
-way to force a clean reboot without physical access), and calling any HA
-service via its REST API requires a Long-Lived Access Token, which requires
-a login to the HA frontend itself. Not claimed as tested.
+### 5.5 Final acceptance: a real dispense and stop, through Home Assistant itself
+
+The one item deliberately left open above: an actual dispense triggered
+*through* Home Assistant's own service mechanism (`grohe_dial.dispense`/
+`grohe_dial.stop`), not the firmware's local HTTP API directly. Blocked at
+the time on two things only the project owner could provide: the physical
+dial's SNTP time had lapsed with USB disconnected (no remote way to force a
+clean reboot without physical access), and calling any HA service via its
+REST API requires a Long-Lived Access Token — deliberately never requested
+in chat, since that's a durable credential, not a one-off action.
+
+Resolved without either workaround. First, a pre-check (read entirely
+through Home Assistant's own view — the recorder DB and a status fetch using
+the token already stored in HA's own config, never typed or displayed)
+confirmed the dial had already recovered on its own: `connection_status:
+READY`, `time_status: AVAILABLE`, BLE connection `on`. Then the project
+owner performed the actual test themselves, directly in the Home Assistant
+UI (Developer Tools → Actions → "Grohe Dial: Dispense"/"Grohe Dial: Stop"),
+using their own already-authenticated session — the one HA-native mechanism
+that needs no token at all. Both calls are genuine HA service calls, routed
+through `hass.services.async_call()` exactly like a dashboard button press
+or an automation action, not a mock and not a call against the dial's HTTP
+API directly.
+
+**Evidence, read entirely from Home Assistant's own state** (recorder DB,
+`sensor.grohe_dial_192_168_178_64_dispense_status`/`_delivered_amount`,
+timestamps UTC):
+
+| Time | `dispense_status` | `delivered_amount` |
+|---|---|---|
+| 11:31:46.512 | `dispensing` | 210 |
+| 11:31:56.650 | `idle` | 0 (first dispense completed) |
+| 11:32:21.634 | `dispensing` | 250 (second dispense started) |
+| 11:32:23.865 | `stopping` | 290 (stop issued mid-flow) |
+| 11:32:35.867 | `idle` | 0 (stopped cleanly) |
+
+The second dispense stopping at 290 mL rather than continuing to its full
+target is the real, positive proof that `grohe_dial.stop` genuinely
+interrupted a real, in-progress pour — not just that the service call
+returned without error. Immediately after, a direct status read confirmed
+`appliance_response: {received: true, success: true, code: 0}` — the real
+Grohe Blue Home's own HMAC-authenticated acknowledgment that it received
+and executed the command, the same identity/integrity proof §2 relies on
+for the appliance-rejection test. `docker logs` for the entire 11:31–11:33
+UTC window contains **zero lines** — no errors, no warnings, no BLE
+disconnect, no reboot — across any integration, not just `grohe_dial`.
+
+**HARDWARE TESTED.** The complete path — Home Assistant → `grohe_dial`
+integration → dial HTTP API → BLE → real Grohe Blue Home → actual water
+dispensing, and back — is proven end to end, including cancellation.
 
 ---
 
@@ -448,16 +492,21 @@ a login to the HA frontend itself. Not claimed as tested.
 | M15.2 True multi-appliance (2 physical units) | ✅ (by construction) | — | ❌ NOT TESTED — only one physical appliance exists for this project |
 | M15.3 via_device resolution | ✅ | ✅ 4 tests + 2 assertions | ✅ real HA 2026.4.1, real `grohe_smarthome` device, incl. a found-and-fixed `via_device_id` incompatibility (§5.4) |
 | HA/grohe package version compatibility | ✅ | ✅ 3 tests + 4 tests | ✅ real HA 2026.4.1 + real `grohe==0.2.4` (§5.1, §5.3) |
+| End-to-end dispense/stop through HA (Part D) | ✅ | — (inherently a live-system test) | ✅ real `grohe_dial.dispense`/`.stop` via HA's own Developer Tools UI, real appliance ack `success: true`, real mid-flow stop (§5.5) |
 
 **Automated tests**: 88/88 pass across `homeassistant/tests/` (71 before
 this branch + 5 `test_stable_identity.py` + 1 self-heal regression test +
 4 `test_via_device.py` + 4 `test_ha_version_compat.py` + 3 `test_cloud.py`
 fallback-classification tests; 2 new assertions added to existing
-`test_provisioning_flow.py` tests, not new test functions).
+`test_provisioning_flow.py` tests, not new test functions). No project
+lint/static-check tooling (ruff/mypy/flake8/CI) is configured for this
+repository — none skipped, none to run.
 
-**Firmware build**: clean, 0 errors, 15 pre-existing warnings only (same
-baseline as M16 — none introduced here). Flash: 20% free on the app
-partition, materially unchanged from before this branch.
+**Firmware build**: clean (full rebuild, not incremental), 0 errors, 15
+pre-existing warnings only (same baseline as M16 — none introduced here,
+and no firmware source changed during this milestone's live-HA
+verification pass). Flash: 20% free on the app partition, materially
+unchanged from before this branch.
 
 **One real bug found and fixed during this milestone's own hardware
 testing**: the identity probe's original single-shot-on-`kSubscribed`
