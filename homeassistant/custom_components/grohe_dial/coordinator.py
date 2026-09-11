@@ -42,6 +42,13 @@ class GroheDialCoordinator(DataUpdateCoordinator[DialStatus]):
         )
         self.client = client
         self._consecutive_connection_failures = 0
+        # M15.3: the internal Device Registry id of a matching
+        # ha-grohe_smarthome device, resolved once in __init__.py's own
+        # async_setup_entry() (see its own comment) -- None whenever no
+        # link was found (or ha-grohe_smarthome isn't installed, or this
+        # dial has no known Cloud appliance_id at all). Read by
+        # entity.py for DeviceInfo's own via_device_id.
+        self.via_device_id: str | None = None
 
     async def _async_update_data(self) -> DialStatus:
         try:

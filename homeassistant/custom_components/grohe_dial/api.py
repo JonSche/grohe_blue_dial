@@ -77,6 +77,12 @@ class DialStatus:
     appliance_response_received: bool
     appliance_response_success: bool
     appliance_response_code: int
+    # M15.1: the dial's own Wi-Fi station MAC ("aa:bb:cc:dd:ee:ff"), added
+    # in provisioning_server.cpp's HandleApiStatusGet() -- None, not "",
+    # against a dial whose firmware predates this field (see from_json()'s
+    # own .get() below), so __init__.py's migration check can tell "no
+    # stable identity available yet" apart from a genuinely empty string.
+    device_id: str | None = None
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> DialStatus:
@@ -92,6 +98,7 @@ class DialStatus:
             appliance_response_received=appliance_response.get("received", False),
             appliance_response_success=appliance_response.get("success", False),
             appliance_response_code=appliance_response.get("code", 0),
+            device_id=data.get("device_id"),
         )
 
 

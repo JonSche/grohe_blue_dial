@@ -34,7 +34,7 @@ from .api import (
     GroheDialConnectionError,
     provision_dial,
 )
-from .const import CONF_API_TOKEN, DEFAULT_PORT, DOMAIN
+from .const import CONF_API_TOKEN, CONF_GROHE_APPLIANCE_ID, DEFAULT_PORT, DOMAIN, STABLE_UNIQUE_ID_PREFIX
 
 DATA_SCHEMA = vol.Schema(
     {
@@ -52,23 +52,27 @@ CONF_PROVISION_TOKEN = "provision_token"
 class GroheDialConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
-    async def _async_validate(self, user_input: dict[str, Any]) -> str | None:
-        """Returns an error code, or None on success -- same shape as
-        every other HA config flow's own validation helper.
+    async def _async_validate(self, user_input: dict[str, Any]) -> tuple[str | None, str | None]:
+        """Returns (error_code, device_id) -- error_code is None on
+        success, matching every other HA config flow's own validation
+        helper shape; device_id (M15.1, the dial's stable, MAC-based
+        identity -- see api.py's own comment on DialStatus.device_id) is
+        only ever meaningful when error_code is None, and even then may
+        still be None against firmware older than that field.
         """
         session = async_get_clientsession(self.hass)
         client = GroheDialApiClient(
             session, user_input[CONF_HOST], int(user_input[CONF_PORT]), user_input[CONF_API_TOKEN]
         )
         try:
-            await client.get_status()
+            status = await client.get_status()
         except GroheDialAuthError:
-            return "invalid_auth"
+            return "invalid_auth", None
         except GroheDialConnectionError:
-            return "cannot_connect"
+            return "cannot_connect", None
         except Exception:  # noqa: BLE001 - anything else really is unexpected here
-            return "unknown"
-        return None
+            return "unknown", None
+        return None, status.device_id
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
         errors: dict[str, str] = {}
@@ -87,16 +91,20 @@ class GroheDialConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # __init__.py's own defensive re-cast for entries already
             # created before this fix.
             user_input[CONF_PORT] = int(user_input[CONF_PORT])
-            error = await self._async_validate(user_input)
+            error, device_id = await self._async_validate(user_input)
             if error is None:
-                # The dial's own stable Wi-Fi-MAC-based device ID isn't
-                # exposed over this API yet (see docs/m15_ha_integration.md
-                # §9) -- host is used as the unique_id for this vertical
-                # slice instead. Known limitation, not an oversight: a
-                # dial that later changes IP (DHCP lease change, no
-                # reservation) would need re-adding, not silently
-                # re-matched. Documented, not hidden.
-                await self.async_set_unique_id(user_input[CONF_HOST])
+                # M15.1: the dial's own stable Wi-Fi-MAC-based device ID,
+                # when the firmware being added already reports one --
+                # used as the unique_id directly, so a brand new entry
+                # never needs __init__.py's own post-hoc migration at
+                # all. Falls back to host (this integration's original
+                # M15 behavior) only against firmware old enough to
+                # predate this field -- __init__.py's own
+                # _async_migrate_to_stable_unique_id() picks that entry
+                # up automatically once the dial's firmware catches up,
+                # so this is a temporary state, not a permanent split.
+                unique_id = f"{STABLE_UNIQUE_ID_PREFIX}{device_id}" if device_id else user_input[CONF_HOST]
+                await self.async_set_unique_id(unique_id)
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(title=f"Grohe Dial ({user_input[CONF_HOST]})", data=user_input)
             errors["base"] = error
@@ -118,7 +126,12 @@ class GroheDialConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # may itself still carry a float port from an entry created
             # before this fix; this also self-heals it going forward.
             merged[CONF_PORT] = int(merged[CONF_PORT])
-            error = await self._async_validate(merged)
+            # device_id is unused here -- reauth only ever updates the API
+            # token (data=merged below), never unique_id; the reload this
+            # triggers runs __init__.py's own async_setup_entry(), whose
+            # _async_migrate_to_stable_unique_id() call picks up a stable
+            # id on its own the moment the dial's firmware reports one.
+            error, _device_id = await self._async_validate(merged)
             if error is None:
                 return self.async_update_reload_and_abort(reauth_entry, data=merged)
             errors["base"] = error
@@ -256,11 +269,20 @@ class GroheDialOptionsFlow(config_entries.OptionsFlow):
             except GroheDialApiError:
                 errors["base"] = "provisioning_failed"
             else:
-                # No config entry *data* actually changes -- provisioning
-                # writes to the dial's own NVS, not to anything HA
-                # stores. title="" is HA's own documented convention for
-                # an options flow that performs an action rather than
-                # editing settings.
+                # M15.3: the one piece of entry.data this flow does
+                # change -- the Cloud-side appliance_id this dial was
+                # just provisioned against, so __init__.py's own
+                # via_device_id resolution (see its own comment) can
+                # later find the matching ha-grohe_smarthome device, if
+                # that integration is installed. Everything else about
+                # provisioning itself writes to the dial's own NVS, not
+                # to anything HA stores -- title="" is HA's own
+                # documented convention for an options flow that
+                # performs an action rather than editing settings.
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data={**self.config_entry.data, CONF_GROHE_APPLIANCE_ID: self._selected.appliance_id},
+                )
                 return self.async_create_entry(title="", data={})
 
         return self.async_show_form(
