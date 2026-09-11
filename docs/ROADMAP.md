@@ -534,22 +534,12 @@ firmware updates over Wi-Fi, with USB retained as the initial-
 installation and recovery mechanism** -- not a generic ESPHome-style
 integration or a complex flashing framework (both considered and
 rejected; see [ARCHITECTURE.md](ARCHITECTURE.md#ota-m12) for the
-investigation). M12.4 delivers that. M12.1/M12.2 remain useful,
-lower-priority tooling ideas, not blockers -- `idf.py build flash
-monitor` and `scripts/ota.sh` already cover simple flashing and Wi-Fi
-updates respectively; JTAG/OpenOCD debugging is a nice-to-have this
-milestone doesn't require.
-
-### M12.1 — Debugging (optional, not required for v1.0)
-
-- [ ] JTAG/OpenOCD setup.
-- [ ] VS Code launch configuration.
-- [ ] Debugging documentation.
-
-### M12.2 — Flashing (optional, not required for v1.0)
-
-- [ ] Flash helper script(s) beyond `idf.py flash`/`scripts/ota.sh`.
-- [ ] Automatic serial-port detection where practical.
+investigation). M12.4 delivers that. `idf.py build flash monitor` and
+`scripts/ota.sh` already cover simple flashing and Wi-Fi updates
+respectively -- a dedicated debugging setup (JTAG/OpenOCD) was never
+pursued as a separate work package; every hardware investigation in
+this project (M14's RAM forensics, M16's reboot-loop diagnosis) used
+serial log capture instead, and that's proven sufficient in practice.
 
 ### M12.3 — Build & Release ✅
 
@@ -1218,11 +1208,11 @@ to reflect what's actually been verified, not just planned; each item
 below links to the milestone(s) that are its evidence.
 
 - [x] M10 completed.
-- [x] M12 completed. Core (M12.3 Build & Release, M12.4 OTA) is done;
-      M12.1 (JTAG/OpenOCD debugging) and M12.2 (flash helper tooling
-      beyond `idf.py flash`/`scripts/ota.sh`) remain explicitly optional
-      and undone -- see their own headings above. Not a blocker: neither
-      was ever load-bearing for shipping, only for developer convenience.
+- [x] M12 completed. Core (M12.3 Build & Release, M12.4 OTA) is done; a
+      dedicated JTAG/OpenOCD debugging setup and flash-helper tooling
+      beyond `idf.py flash`/`scripts/ota.sh` were never pursued as
+      separate work -- see M12's own prose above for why neither was
+      ever load-bearing for shipping, only developer convenience.
 - [x] M13 completed -- via M15, not this milestone's original MQTT
       design (see M13's own updated heading above). Every underlying
       goal (persistent settings, provisioning, a real HA integration,
@@ -1245,12 +1235,12 @@ below links to the milestone(s) that are its evidence.
       §7. USB is the unconditional fallback for that one case, and M16.3
       now also makes a hang that *causes* such a loop self-correct via
       the watchdog rather than requiring recovery at all.
-- [x] Reliable debugging. Not via M12.1's originally-planned JTAG/OpenOCD
-      setup (still undone, still optional) -- via serial log capture and
-      systematic root-causing instead, the same method used successfully
-      across every hardware investigation in this project, including
-      M14's RAM forensics and M16's own reboot-loop diagnosis. Judged
-      sufficient in practice, not just in principle.
+- [x] Reliable debugging. Not via a dedicated JTAG/OpenOCD setup (never
+      pursued) -- via serial log capture and systematic root-causing
+      instead, the same method used successfully across every hardware
+      investigation in this project, including M14's RAM forensics and
+      M16's own reboot-loop diagnosis. Judged sufficient in practice, not
+      just in principle.
 - [x] No known **critical** defects. Known, non-critical limitations are
       tracked, not hidden: OTA's boot-time-radio-contention edge case
       (above, USB fallback always available), the dial's host/IP-based
