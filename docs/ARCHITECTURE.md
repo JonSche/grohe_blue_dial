@@ -890,22 +890,37 @@ host/IP. An existing entry migrates to this in place --
 `__init__.py`'s `_async_migrate_to_stable_unique_id()` renames the
 *same* Device/Entity Registry rows (same `device.id`, same
 `entity_id`s) rather than letting HA create new ones alongside orphaned
-old ones, since `entity.py`'s own `dial_id` computation feeds both. See
-[`docs/m15_completion.md`](m15_completion.md) §1 for the full mechanism
-and why this runs from `async_setup_entry()` itself, not HA's formal
-`async_migrate_entry`.
+old ones, since `entity.py`'s own `dial_id` computation feeds both, and
+independently re-checks/self-heals the device registry's own
+identifiers on every setup call, not just the first -- found necessary
+against a real Home Assistant instance where a first migration attempt
+correctly renamed `unique_id` and every entity but left the device
+registry row itself stuck on the old identifier. See
+[`docs/m15_completion.md`](m15_completion.md) §1 and §5.2 for the full
+mechanism, why this runs from `async_setup_entry()` itself rather than
+HA's formal `async_migrate_entry`, and that real-world gap.
 
 Separately, `config_flow.py`'s `GroheDialOptionsFlow` (above) now also
 persists the Cloud `appliance_id` it already fetches during
-provisioning into the config entry; `__init__.py` resolves it against
-the Device Registry (`device_registry.async_get_devices()`, searching
-across every config entry -- the target device, if any, belongs to a
-*different* integration) to a `ha-grohe_smarthome` device, if one is
-installed and owns a device for that same `appliance_id`, and links
-this dial to it via `DeviceInfo(via_device_id=...)`. Fully soft in
-every direction: no import of `ha-grohe_smarthome`'s own code, no error
-if it isn't installed, no error if the link can't be resolved -- see
-[`docs/m15_completion.md`](m15_completion.md) §3.
+provisioning into the config entry; `__init__.py`'s `_resolve_via_device()`
+resolves it against the Device Registry to a `ha-grohe_smarthome` device,
+if one is installed and owns a device for that same `appliance_id`, and
+links this dial to it. Both the lookup and the link itself are resolved
+against whichever Device Registry shape this specific, running Home
+Assistant version actually has, detected at runtime rather than assumed:
+`_find_device_by_identifier()` picks between the current
+`device_registry.async_get_devices()` and the older, unscoped
+`async_get_device()` depending on which one exists; `entity.py` sets
+either `DeviceInfo(via_device_id=...)` or the older
+`DeviceInfo(via_device=(domain, identifier))` depending on which key this
+version's own `DeviceInfo` TypedDict declares. Both branches are real,
+hardware-verified paths, not a hedge against a hypothetical -- the
+project's own live Home Assistant instance takes the older path on both
+counts. Fully soft in every direction regardless of which: no import of
+`ha-grohe_smarthome`'s own code, no error if it isn't installed, no error
+if the link can't be resolved -- see
+[`docs/m15_completion.md`](m15_completion.md) §3 and §5 for the full
+mechanism, both HA generations, and the real evidence.
 
 ## MQTT / Home Assistant Discovery (M13.3, removed in M15)
 

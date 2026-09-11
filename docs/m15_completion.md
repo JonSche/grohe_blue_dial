@@ -23,7 +23,8 @@
 > Grohe Blue Home over BLE and back. The only genuinely unavailable
 > equipment remains untested: a second physical Grohe Blue Home (§2).
 > Implemented on branch `feature/m15-completion`, off `main`@`a5fb657`,
-> not yet merged. Tags used throughout: **IMPLEMENTED**,
+> merged into `main` once this document reached its final form. Tags
+> used throughout: **IMPLEMENTED**,
 > **AUTOMATED TESTED**, **HARDWARE TESTED**, **NOT TESTED**.
 
 ---

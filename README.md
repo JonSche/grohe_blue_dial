@@ -183,8 +183,9 @@ the reasoning behind every non-obvious decision live in
 | HA connection retry/backoff, actionable error messages | ✅ Hardware-validated |
 | App-task watchdog (hang → automatic reset) | ✅ Hardware-validated |
 | Grohe Cloud provisioning from Home Assistant | ✅ Hardware-validated |
-| Stable, MAC-based Home Assistant identity | ✅ Hardware-validated (firmware); automated-tested (HA-side migration) |
+| Stable, MAC-based Home Assistant identity (incl. `via_device` linking) | ✅ Hardware-validated end to end, against the project's real, live Home Assistant instance |
 | Multi-appliance BLE disambiguation (cryptographic pinning) | ✅ Hardware-validated, including a real rejection of a wrong-credentialed appliance |
+| Dispense/stop invoked through Home Assistant's own service mechanism | ✅ Hardware-validated — a real `grohe_dial.dispense`/`.stop`, real appliance ack, real mid-flow cancel |
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the complete milestone-by-milestone
 history, and its "v1.0 Release Criteria" section for what "done" means for

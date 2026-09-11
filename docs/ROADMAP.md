@@ -1,9 +1,9 @@
 # Roadmap
 
-Milestones for Grohe Dial. The Grohe Blue BLE contract (M3–M9), the core
-dispense experience (M11), water-type support (M10), and Wi-Fi OTA
-updates (M12) are implemented and hardware-validated; the remaining
-milestone (M13) extends product scope on top of that foundation.
+Milestones for Grohe Dial. M0 through M16 are all implemented and
+hardware-validated -- see each milestone's own section below for its
+scope and evidence, and the "v1.0 Release Criteria" section near the end
+for what "done" means for this project as a whole.
 
 ## M0 — Raw hardware bring-up ✅
 
@@ -1163,10 +1163,10 @@ Home Assistant -> Grohe Dial HA Integration -> local HTTP -> Grohe Dial -> BLE -
 Committed as four commits, all merged to `main` (`bb10480`, `d8ff91c`,
 `141db73`, `57d2b7e`), M14 (`c31058a`) unchanged as their ancestor. The
 three items above, plus the real-HA-instance verification pass, closed
-later on `feature/m15-completion`, once M16 had already closed -- not
-yet merged to `main` as of this writing; see that branch's own commits
-and [`docs/m15_completion.md`](m15_completion.md) for the full account
-of why M15 stayed open that long.
+later on `feature/m15-completion`, once M16 had already closed, and were
+merged to `main` once M15 was fully complete -- see that branch's own
+commits and [`docs/m15_completion.md`](m15_completion.md) for the full
+account of why M15 stayed open that long.
 
 ### M16 — Reliability Hardening + Grohe Blue Provisioning ✅
 
